@@ -1,0 +1,14 @@
+{
+  "1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"v1-5-pruned-emaonly.safetensors"}},
+  "2": {"class_type":"LoadImage","inputs":{"image":"__SOURCE_IMAGE__"}},
+  "3": {"class_type":"ImageScale","inputs":{"upscale_method":"lanczos","width":"__WIDTH__","height":"__HEIGHT__","crop":"center","image":["2",0]}},
+  "4": {"class_type":"VAEEncode","inputs":{"pixels":["3",0],"vae":["1",2]}},
+  "5": {"class_type":"RepeatLatentBatch","inputs":{"samples":["4",0],"amount":"__FRAMES__"}},
+  "6": {"class_type":"ADE_LoadAnimateDiffModel","inputs":{"model_name":"mm_sd_v15_v3.safetensors"}},
+  "7": {"class_type":"ADE_ApplyAnimateDiffModelSimple","inputs":{"motion_model":["6",0],"model":["1",0]}},
+  "8": {"class_type":"CLIPTextEncode","inputs":{"text":"__PROMPT__","clip":["1",1]}},
+  "9": {"class_type":"CLIPTextEncode","inputs":{"text":"__NEGATIVE__","clip":["1",1]}},
+  "10": {"class_type":"KSampler","inputs":{"seed":"__SEED__","steps":16,"cfg":5,"sampler_name":"euler","scheduler":"normal","denoise":"__DENOISE__","model":["7",0],"positive":["8",0],"negative":["9",0],"latent_image":["5",0]}},
+  "11": {"class_type":"VAEDecode","inputs":{"samples":["10",0],"vae":["1",2]}},
+  "12": {"class_type":"SaveAnimatedWEBP","inputs":{"filename_prefix":"AnimationLab","fps":"__FPS__","lossless":false,"quality":90,"method":"default","images":["11",0]}}
+}
