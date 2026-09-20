@@ -72,3 +72,17 @@ export function loraDisplayName(loraName: string): string {
 export function clampWeight(weight: number, min = 0.1, max = 3.0): number {
   return Math.max(min, Math.min(max, Number(weight.toFixed(2))));
 }
+
+/** Pulls every lora/lyco reference out of a raw prompt string (comma-separated tags),
+ *  skipping muted (comment-wrapped) tokens. Used anywhere a compact "which LoRAs does
+ *  this prompt use" summary is needed - e.g. the queue manager - without a full pill parse. */
+export function extractPromptLoras(prompt: string): ParsedWeightedToken[] {
+  if (!prompt) return [];
+  return prompt
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .filter((t) => !(t.startsWith('/*') && t.endsWith('*/')))
+    .filter((t) => isLoraToken(t))
+    .map((t) => parseWeightedToken(t));
+}

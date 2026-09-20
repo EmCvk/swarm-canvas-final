@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { swarmClient, SwarmProgressData } from '../api/swarmClient';
 import { civitaiService, CivitaiAssetType } from '../api/civitaiService';
+import { emitToast } from '../utils/toast';
 
 export interface ModelItem {
   name: string;
@@ -975,6 +976,9 @@ export const useAppStore = create<AppState>()(
           if (generationRunToken !== runToken) return;
         }
 
+        let completedCount = 0;
+        let failedCount = 0;
+
         while (get().queue.length > 0 && generationRunToken === runToken) {
           if (get().isQueuePaused) {
             await new Promise((r) => setTimeout(r, 400));
@@ -1151,9 +1155,13 @@ export const useAppStore = create<AppState>()(
               galleryHistory: [...newHistoryItems, ...s.galleryHistory].slice(0, limit),
             }));
 
+            completedCount += 1;
+
           } catch (e: any) {
             if (generationRunToken !== runToken) break;
             console.error('Queue job failure:', e);
+            failedCount += 1;
+            emitToast(`Generation failed: ${e?.message || 'unknown error'}`, 'error');
             set((s) => ({
               lastFailedJob: { ...nextJob, status: 'failed', progress: s.progressPercent, step: s.currentStep, maxSteps: s.maxSteps },
               metrics: {
@@ -1165,6 +1173,16 @@ export const useAppStore = create<AppState>()(
         }
 
         if (generationRunToken !== runToken) return;
+
+        if (completedCount + failedCount > 1) {
+          if (failedCount === 0) {
+            emitToast(`Queue finished - ${completedCount} image${completedCount === 1 ? '' : 's'} generated`, 'success');
+          } else if (completedCount === 0) {
+            emitToast(`Queue finished - all ${failedCount} job${failedCount === 1 ? '' : 's'} failed`, 'error');
+          } else {
+            emitToast(`Queue finished - ${completedCount} succeeded, ${failedCount} failed`, 'warning');
+          }
+        }
 
         set({
           isGenerating: false,
@@ -1222,6 +1240,7 @@ export const useAppStore = create<AppState>()(
         }
 
         set({ isGenerating: false, activeJob: null, sessionId: null, livePreview: null, currentQueueBatchId: null, currentStep: 0, progressPercent: 0, metrics: { ...get().metrics, stage: 'Interrupted' } });
+        emitToast('Generation cancelled', 'warning');
       },
 
       cancelQueuedJob: (id) =>

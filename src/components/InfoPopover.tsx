@@ -20,19 +20,18 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function getPosition(anchor: DOMRect, side: NonNullable<Props['side']>): Position {
+function getPosition(anchor: DOMRect, side: NonNullable<Props['side']>, estimatedHeight: number): Position {
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
-  const heightEstimate = 84;
   const options: Array<{ side: Exclude<NonNullable<Props['side']>, 'auto'>; fits: boolean; pos: Position }> = [
     {
       side: 'top',
-      fits: anchor.top >= heightEstimate + GAP,
+      fits: anchor.top >= estimatedHeight + GAP,
       pos: { left: anchor.right - WIDTH, top: anchor.top - GAP, transform: 'translateY(-100%)' },
     },
     {
       side: 'bottom',
-      fits: anchor.bottom + heightEstimate + GAP <= viewportHeight,
+      fits: anchor.bottom + estimatedHeight + GAP <= viewportHeight,
       pos: { left: anchor.right - WIDTH, top: anchor.bottom + GAP },
     },
     {
@@ -53,9 +52,32 @@ function getPosition(anchor: DOMRect, side: NonNullable<Props['side']>): Positio
   const left = chosen.side === 'left' || chosen.side === 'right'
     ? chosen.pos.left
     : clamp(chosen.pos.left, VIEWPORT_MARGIN, maxLeft);
-  const top = clamp(chosen.pos.top, VIEWPORT_MARGIN, Math.max(VIEWPORT_MARGIN, viewportHeight - heightEstimate - VIEWPORT_MARGIN));
+
+  // Each side's `top` means something different once its transform is applied, so it must be
+  // clamped against the viewport edge it can actually violate - clamping every side against the
+  // same "non-flipped box" formula pushed 'top'-side tooltips further from their anchor than
+  // intended without ever fixing the case it was meant for.
+  let top: number;
+  if (chosen.side === 'top') {
+    // Box occupies [top - height, top]; only the upper edge can go off-screen.
+    top = Math.max(chosen.pos.top, estimatedHeight + VIEWPORT_MARGIN);
+  } else if (chosen.side === 'bottom') {
+    // Box occupies [top, top + height]; only the lower edge can go off-screen.
+    top = Math.min(chosen.pos.top, Math.max(VIEWPORT_MARGIN, viewportHeight - estimatedHeight - VIEWPORT_MARGIN));
+  } else {
+    // 'left' / 'right': box is vertically centered on `top`; either edge can go off-screen.
+    top = clamp(chosen.pos.top, estimatedHeight / 2 + VIEWPORT_MARGIN, Math.max(VIEWPORT_MARGIN, viewportHeight - estimatedHeight / 2 - VIEWPORT_MARGIN));
+  }
 
   return { ...chosen.pos, left, top };
+}
+
+/** Rough height estimate for a content string at this card's fixed width, used only to decide
+ *  which side has room and to clamp the fallback position - never to size the box itself. */
+function estimateContentHeight(content: string): number {
+  const charsPerLine = 34;
+  const lines = Math.max(1, Math.ceil(content.length / charsPerLine));
+  return Math.min(260, lines * 19 + 18);
 }
 
 /** Small, accessible information popover. When children are supplied, they become the trigger itself. */
@@ -66,8 +88,8 @@ export const InfoPopover: React.FC<Props> = ({ content, side = 'auto', className
 
   const updatePosition = React.useCallback(() => {
     if (!anchorRef.current) return;
-    setPosition(getPosition(anchorRef.current.getBoundingClientRect(), side));
-  }, [side]);
+    setPosition(getPosition(anchorRef.current.getBoundingClientRect(), side, estimateContentHeight(content)));
+  }, [side, content]);
 
   React.useEffect(() => {
     if (!open) return;

@@ -1700,6 +1700,12 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
     transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(192,38,211,.18);
   }
+  .sc-lora-pills-bar .absolute.top-full {
+    animation: sc-panel-in .14s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .sc-queue-chip {
+    animation: sc-pill-in .14s cubic-bezier(.2,.8,.2,1) both;
+  }
 }
 
 /* Prefer compositor-friendly rendering for repeated, independently scrolling UI. */

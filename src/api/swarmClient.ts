@@ -564,6 +564,7 @@ class SwarmClientClass {
                 message: `Generation completed with ${collectedImages.length} image(s)`
               });
               if (activeGenerationSessionId === session) { activeGenerationSessionId = ''; if (activeGenerationSocket === ws) activeGenerationSocket = null; }
+              try { ws.close(1000, 'Generation complete'); } catch {}
               resolve({ imageUrl: collectedImages[collectedImages.length - 1], images: collectedImages });
             }
           }
@@ -577,6 +578,7 @@ class SwarmClientClass {
                 message: `Generation failed: ${msg.error}`
               });
               if (activeGenerationSessionId === session) { activeGenerationSessionId = ''; if (activeGenerationSocket === ws) activeGenerationSocket = null; }
+              try { ws.close(1000, 'Generation failed'); } catch {}
               reject(new Error(msg.error));
             }
           }

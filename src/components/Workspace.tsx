@@ -71,7 +71,9 @@ import { StudioToolsPanel } from './StudioToolsPanel';
 
 import { swarmClient, emitDiagnostic } from '../api/swarmClient';
 
-import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken } from '../utils/promptWeights';
+import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken, extractPromptLoras } from '../utils/promptWeights';
+
+import { emitToast } from '../utils/toast';
 
 import {
 
@@ -93,7 +95,7 @@ import {
 
   Star, Info, Volume2, Play, Sparkles, Crop, Type, Move, GripVertical,
 
-  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X
+  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X, Keyboard
 
 } from 'lucide-react';
 
@@ -594,12 +596,6 @@ const ModelPreview = React.memo(({ url, urls = [], name, type = 'model', classNa
 });
 
 
-
-export const emitToast = (message: string, tone: 'success' | 'info' | 'warning' | 'error' = 'info') => {
-
-  window.dispatchEvent(new CustomEvent('swarm-toast', { detail: { message, tone } }));
-
-};
 
 
 
@@ -1617,7 +1613,8 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <button
+        <InfoPopover content="Adds the current prompt and parameters to the end of the queue and starts processing if nothing is running. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="left" className="sc-popover-button-trigger">
+          <button
             type="button"
             onClick={() => void enqueueAndProcess()}
             className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
@@ -1626,7 +1623,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
             <Plus className="w-3.5 h-3.5 text-blue-300" />
             <span>Queue</span>
           </button>
-        
+        </InfoPopover>
 
       </div>
 
@@ -2096,13 +2093,57 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
                               </span>
 
-                              <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+                              <div className="flex flex-col min-w-0 flex-1 gap-1">
 
                                 <span className={`text-left text-gray-300 font-mono text-[11px] ${isQueueExpanded ? 'line-clamp-2' : 'truncate'}`}>
 
                                   {item.prompt}
 
                                 </span>
+
+                                <div className="flex items-center gap-1 flex-wrap">
+
+                                  <span
+
+                                    className="sc-queue-chip inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-sky-300 max-w-40 truncate"
+
+                                    title={item.model}
+
+                                  >
+
+                                    <Box className="w-2.5 h-2.5 shrink-0" />
+
+                                    {item.model ? item.model.split('/').pop()?.replace(/\.[^/.]+$/, '') : 'unknown model'}
+
+                                  </span>
+
+                                  <span className="sc-queue-chip inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-zinc-400">
+
+                                    {item.width}×{item.height} · {item.steps} steps · CFG {item.cfgScale}
+
+                                  </span>
+
+                                  {extractPromptLoras(item.prompt).map((lora, li) => (
+
+                                    <span
+
+                                      key={`${item.id}-lora-${li}`}
+
+                                      className="sc-queue-chip inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-fuchsia-950/40 border border-fuchsia-500/40 text-[9px] font-mono text-fuchsia-200 max-w-32 truncate"
+
+                                      title={lora.loraName}
+
+                                    >
+
+                                      <Sparkle className="w-2.5 h-2.5 shrink-0" />
+
+                                      {loraDisplayName(lora.loraName || lora.base)} {lora.weight.toFixed(2)}×
+
+                                    </span>
+
+                                  ))}
+
+                                </div>
 
                               </div>
 
@@ -2111,6 +2152,50 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                             {!item.isRunning && (
 
                               <div className="flex items-center gap-1 shrink-0 opacity-80 group-hover:opacity-100 transition pt-0.5">
+
+                                <button
+
+                                  type="button"
+
+                                  onMouseDown={(e) => e.stopPropagation()}
+
+                                  onPointerDown={(e) => e.stopPropagation()}
+
+                                  onClick={(e) => { e.stopPropagation(); if (globalIndex > 0) store.reorderQueue(globalIndex, globalIndex - 1); }}
+
+                                  disabled={globalIndex <= 0}
+
+                                  className="p-1 text-gray-500 hover:text-amber-300 rounded cursor-pointer transition disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:text-gray-500"
+
+                                  title="Move up in queue"
+
+                                >
+
+                                  <ChevronUp className="w-3 h-3" />
+
+                                </button>
+
+                                <button
+
+                                  type="button"
+
+                                  onMouseDown={(e) => e.stopPropagation()}
+
+                                  onPointerDown={(e) => e.stopPropagation()}
+
+                                  onClick={(e) => { e.stopPropagation(); if (globalIndex >= 0 && globalIndex < queue.length - 1) store.reorderQueue(globalIndex, globalIndex + 1); }}
+
+                                  disabled={globalIndex < 0 || globalIndex >= queue.length - 1}
+
+                                  className="p-1 text-gray-500 hover:text-amber-300 rounded cursor-pointer transition disabled:opacity-25 disabled:cursor-not-allowed disabled:hover:text-gray-500"
+
+                                  title="Move down in queue"
+
+                                >
+
+                                  <ChevronDown className="w-3 h-3" />
+
+                                </button>
 
                                 <button
 
@@ -2351,6 +2436,20 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   type PromptHistoryEntry = { id: string; positive: string; negative: string; createdAt: number };
 
+  type LoraPreset = { id: string; name: string; loras: { loraType: string; loraName: string; weight: number }[]; savedAt: number };
+
+  const loadLoraPresets = (): LoraPreset[] => {
+
+    try {
+
+      const parsed = JSON.parse(localStorage.getItem('swarm_lora_presets_v1') || '[]');
+
+      return Array.isArray(parsed) ? parsed : [];
+
+    } catch { return []; }
+
+  };
+
   const loadPromptSlots = (): PromptSlot[] => {
 
     try {
@@ -2381,6 +2480,88 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [promptHistory, setPromptHistory] = useState<PromptHistoryEntry[]>(loadPromptHistory);
 
+  const [loraPresets, setLoraPresets] = useState<LoraPreset[]>(loadLoraPresets);
+
+  const [loraPresetMenuTarget, setLoraPresetMenuTarget] = useState<'positive' | 'negative' | null>(null);
+
+  const promptKitFileInputRef = useRef<HTMLInputElement>(null);
+
+
+
+  useEffect(() => {
+
+    if (!loraPresetMenuTarget) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+
+      if (!(e.target as HTMLElement).closest('.sc-lora-pills-bar')) setLoraPresetMenuTarget(null);
+
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+
+  }, [loraPresetMenuTarget]);
+
+
+
+  /** Downloads the user's saved prompt slots and LoRA presets as a single JSON file,
+   *  so a favorite setup can be backed up or moved to another machine. */
+  const exportPromptKit = () => {
+    const payload = {
+      kind: 'swarm-canvas-prompt-kit',
+      version: 1,
+      exportedAt: Date.now(),
+      promptSlots,
+      loraPresets,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `swarm-canvas-prompt-kit-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    emitToast(`Exported ${promptSlots.length} prompt slot(s) and ${loraPresets.length} LoRA preset(s)`, 'success');
+  };
+
+  /** Merges an exported prompt kit back in. Slots/presets are matched by id/name so
+   *  re-importing the same file is idempotent rather than creating duplicates. */
+  const importPromptKit = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result));
+        const importedSlots: PromptSlot[] = Array.isArray(data.promptSlots) ? data.promptSlots : [];
+        const importedPresets: LoraPreset[] = Array.isArray(data.loraPresets) ? data.loraPresets : [];
+
+        if (importedSlots.length > 0) {
+          setPromptSlots((prev) => {
+            const byId = new Map(prev.map((s) => [s.id, s]));
+            importedSlots.forEach((s) => byId.set(s.id, s));
+            return Array.from(byId.values());
+          });
+        }
+        if (importedPresets.length > 0) {
+          setLoraPresets((prev) => {
+            const byName = new Map(prev.map((p) => [p.name, p]));
+            importedPresets.forEach((p) => byName.set(p.name, p));
+            return Array.from(byName.values());
+          });
+        }
+
+        if (importedSlots.length === 0 && importedPresets.length === 0) {
+          emitToast('That file has no prompt slots or LoRA presets to import', 'warning');
+        } else {
+          emitToast(`Imported ${importedSlots.length} prompt slot(s) and ${importedPresets.length} LoRA preset(s)`, 'success');
+        }
+      } catch {
+        emitToast('Could not read that file - is it a valid prompt kit export?', 'error');
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const [promptToolsOpen, setPromptToolsOpen] = useState<'slots' | 'history' | 'cleanup' | 'diff' | null>(null);
 
   const [selectedPromptHistoryId, setSelectedPromptHistoryId] = useState<string | null>(null);
@@ -2404,6 +2585,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     try { localStorage.setItem('swarm_prompt_history_v1', JSON.stringify(promptHistory.slice(0, 40))); } catch {}
 
   }, [promptHistory]);
+
+
+
+  useEffect(() => {
+
+    try { localStorage.setItem('swarm_lora_presets_v1', JSON.stringify(loraPresets)); } catch {}
+
+  }, [loraPresets]);
 
 
 
@@ -3015,15 +3204,59 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       });
   };
 
+  /** Saves the currently-active (non-muted) LoRA combination on a prompt target as a named,
+   *  reusable preset, so a favorite LoRA "stack" can be dropped into a new prompt later. */
+  const saveLoraPreset = (target: 'positive' | 'negative') => {
+    const active = getActiveLoraTokens(target).filter((l) => !l.muted);
+    if (active.length === 0) return;
+    const name = window.prompt('Save this LoRA combination as:', '');
+    if (!name || !name.trim()) return;
+    const trimmedName = name.trim();
+    const preset: LoraPreset = {
+      id: `lorapreset-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: trimmedName,
+      loras: active.map(({ parsed }) => ({
+        loraType: parsed.loraType || 'lora',
+        loraName: parsed.loraName || parsed.base,
+        weight: parsed.weight,
+      })),
+      savedAt: Date.now(),
+    };
+    setLoraPresets((prev) => [preset, ...prev.filter((p) => p.name !== trimmedName)]);
+    emitToast(`Saved LoRA preset "${trimmedName}" (${preset.loras.length} LoRA${preset.loras.length === 1 ? '' : 's'})`, 'success');
+  };
+
+  /** Appends a saved LoRA combination to a prompt target, skipping any LoRA already present. */
+  const applyLoraPreset = (target: 'positive' | 'negative', preset: LoraPreset) => {
+    const tokens = getPromptTokens(target);
+    const existingLoraNames = new Set(
+      getActiveLoraTokens(target).map(({ parsed }) => (parsed.loraName || '').toLowerCase())
+    );
+    const additions = preset.loras
+      .filter((l) => !existingLoraNames.has(l.loraName.toLowerCase()))
+      .map((l) => `<${l.loraType}:${l.loraName}:${Number(l.weight.toFixed(2))}>`);
+    if (additions.length > 0) {
+      setPromptTokens(target, [...tokens, ...additions]);
+      emitToast(`Added ${additions.length} LoRA${additions.length === 1 ? '' : 's'} from "${preset.name}"`, 'success');
+    } else {
+      emitToast(`All LoRAs from "${preset.name}" are already in the prompt`, 'info');
+    }
+    setLoraPresetMenuTarget(null);
+  };
+
+  const deleteLoraPreset = (id: string) => {
+    setLoraPresets((prev) => prev.filter((p) => p.id !== id));
+  };
+
   /** Compact strip of active LoRA/LyCORIS pills shown above a prompt box, so weights and
    *  enabled state can be managed without hunting through a long tag list. Scroll-to-adjust
    *  mirrors the inline pill behavior and always preserves `<lora:name:weight>` syntax. */
   const renderLoraPillsBar = (target: 'positive' | 'negative') => {
     const loras = getActiveLoraTokens(target);
-    if (loras.length === 0) return null;
+    if (loras.length === 0 && loraPresets.length === 0) return null;
 
     return (
-      <div className="sc-lora-pills-bar flex items-center gap-1.5 px-2 py-1.5 border-b border-[#242838] overflow-x-auto shrink-0">
+      <div className="sc-lora-pills-bar flex items-center gap-1.5 px-2 py-1.5 border-b border-[#242838] overflow-x-auto shrink-0 relative">
         <Sparkle className="w-3 h-3 text-fuchsia-400 shrink-0" />
         {loras.map(({ index, muted, parsed }) => (
           <div
@@ -3069,6 +3302,57 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </button>
           </div>
         ))}
+
+        <div className="flex-1" />
+
+        {loras.some((l) => !l.muted) && (
+          <button
+            type="button"
+            onClick={() => saveLoraPreset(target)}
+            className="sc-lora-pill flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-[#2d3346] text-[10px] font-mono text-zinc-400 hover:text-amber-200 hover:border-amber-500/40 transition shrink-0"
+            title="Save this LoRA combination as a preset"
+          >
+            <Bookmark className="w-2.5 h-2.5" />
+          </button>
+        )}
+
+        {loraPresets.length > 0 && (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setLoraPresetMenuTarget(loraPresetMenuTarget === target ? null : target)}
+              className="sc-lora-pill flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-[#2d3346] text-[10px] font-mono text-zinc-400 hover:text-amber-200 hover:border-amber-500/40 transition"
+              title="Load a saved LoRA combination"
+            >
+              <BookOpen className="w-2.5 h-2.5" />
+            </button>
+            {loraPresetMenuTarget === target && (
+              <div className="absolute top-full right-0 mt-1 w-52 max-h-56 overflow-y-auto rounded-xl bg-[#181a1c] border border-[#2d3346] p-1 shadow-2xl z-50">
+                {loraPresets.map((preset) => (
+                  <div key={preset.id} className="flex items-center gap-1 px-2 py-1.5 rounded-lg hover:bg-white/5 group">
+                    <button
+                      type="button"
+                      onClick={() => applyLoraPreset(target, preset)}
+                      className="flex-1 min-w-0 text-left text-[10px] font-mono text-zinc-200 truncate"
+                      title={preset.loras.map((l) => `${loraDisplayName(l.loraName)} (${l.weight.toFixed(2)}×)`).join(', ')}
+                    >
+                      {preset.name}
+                      <span className="ml-1 text-zinc-500">({preset.loras.length})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteLoraPreset(preset.id)}
+                      className="p-0.5 rounded opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-rose-300 transition-opacity"
+                      title="Delete preset"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -5056,6 +5340,64 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 </div>
 
               ))}
+
+            </div>
+
+            <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-white/10">
+
+              <button
+
+                type="button"
+
+                onClick={exportPromptKit}
+
+                className="flex-1 px-2 py-1 rounded bg-[#24272a] hover:bg-[#2d3033] text-[9px] text-[#eeeae2] cursor-pointer flex items-center justify-center gap-1"
+
+                title="Download your prompt slots and LoRA presets as a JSON file"
+
+              >
+
+                <Download className="w-2.5 h-2.5" /> Export Kit
+
+              </button>
+
+              <button
+
+                type="button"
+
+                onClick={() => promptKitFileInputRef.current?.click()}
+
+                className="flex-1 px-2 py-1 rounded bg-[#24272a] hover:bg-[#2d3033] text-[9px] text-[#eeeae2] cursor-pointer flex items-center justify-center gap-1"
+
+                title="Import prompt slots and LoRA presets from a previously exported JSON file"
+
+              >
+
+                <BookOpen className="w-2.5 h-2.5" /> Import Kit
+
+              </button>
+
+              <input
+
+                ref={promptKitFileInputRef}
+
+                type="file"
+
+                accept="application/json"
+
+                className="hidden"
+
+                onChange={(e) => {
+
+                  const file = e.target.files?.[0];
+
+                  if (file) importPromptKit(file);
+
+                  e.target.value = '';
+
+                }}
+
+              />
 
             </div>
 
@@ -8307,9 +8649,13 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
+
 
 
   const sessionHistory = useMemo(() => {
+
+    const query = historySearchQuery.trim().toLowerCase();
 
     const filtered = history
 
@@ -8321,11 +8667,21 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
       })
 
-      .filter((item) => (!showFavoritesOnly ? true : item.isFavorite));
+      .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
+
+      .filter((item) => {
+
+        if (!query) return true;
+
+        const haystack = `${item.prompt || ''} ${item.negativePrompt || ''} ${item.params?.model || ''} ${item.params?.seed ?? ''}`.toLowerCase();
+
+        return haystack.includes(query);
+
+      });
 
 
 
-    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly) {
+    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly && !query) {
 
       return history.slice(0, 100);
 
@@ -8335,7 +8691,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
     return filtered;
 
-  }, [history, sessionStartTime, showFavoritesOnly]);
+  }, [history, sessionStartTime, showFavoritesOnly, historySearchQuery]);
 
 
 
@@ -8465,15 +8821,55 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
     >
 
-      <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
+      <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5 gap-2">
 
-        <span className="font-semibold text-gray-300 flex items-center gap-1">
+        <span className="font-semibold text-gray-300 flex items-center gap-1 shrink-0">
 
           <HistoryIcon className="w-3.5 h-3.5 text-indigo-400" /> Current Session ({sessionHistory.length})
 
         </span>
 
-        <div className="flex items-center gap-1.5 relative">
+        <div className="flex-1 min-w-0 relative">
+
+          <Search className="w-3 h-3 text-gray-600 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+
+          <input
+
+            type="text"
+
+            value={historySearchQuery}
+
+            onChange={(e) => setHistorySearchQuery(e.target.value)}
+
+            placeholder="Search prompt, model, seed..."
+
+            className="w-full pl-6 pr-6 py-1 rounded-lg bg-[#0d0e14] border border-white/10 text-[10px] font-mono text-gray-300 placeholder:text-gray-600 focus:outline-none focus:border-indigo-500/50 transition"
+
+          />
+
+          {historySearchQuery && (
+
+            <button
+
+              type="button"
+
+              onClick={() => setHistorySearchQuery('')}
+
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+
+              title="Clear search"
+
+            >
+
+              <X className="w-3 h-3" />
+
+            </button>
+
+          )}
+
+        </div>
+
+        <div className="flex items-center gap-1.5 relative shrink-0">
 
           <button
 
@@ -8559,7 +8955,13 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
         {batchedHistory.length === 0 ? (
 
-          <span className="text-gray-600 m-auto">No generations in this session yet.</span>
+          <span className="text-gray-600 m-auto text-center px-4">
+            {historySearchQuery
+              ? `No generations match "${historySearchQuery}".`
+              : showFavoritesOnly
+              ? 'No favorited generations yet.'
+              : 'No generations in this session yet.'}
+          </span>
 
         ) : (
 
@@ -8843,6 +9245,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
+  const [gallerySearchQuery, setGallerySearchQuery] = useState('');
+
   const [isSyncingServer, setIsSyncingServer] = useState(false);
 
   // Switch between App-only local store history or all server image history
@@ -8853,9 +9257,23 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const filteredGallery = useMemo(() => {
 
-    return rawDataset.filter((item) => (!showFavoritesOnly ? true : item.isFavorite));
+    const query = gallerySearchQuery.trim().toLowerCase();
 
-  }, [rawDataset, showFavoritesOnly]);
+    return rawDataset
+
+      .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
+
+      .filter((item: any) => {
+
+        if (!query) return true;
+
+        const haystack = `${item.prompt || ''} ${item.negativePrompt || ''} ${item.params?.model || ''} ${item.params?.seed ?? ''}`.toLowerCase();
+
+        return haystack.includes(query);
+
+      });
+
+  }, [rawDataset, showFavoritesOnly, gallerySearchQuery]);
 
 
 
@@ -8968,6 +9386,48 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
           <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Gallery ({filteredGallery.length})
 
         </span>
+
+
+
+        <div className="relative w-40 shrink-0">
+
+          <Search className="w-3 h-3 text-gray-600 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+
+          <input
+
+            type="text"
+
+            value={gallerySearchQuery}
+
+            onChange={(e) => setGallerySearchQuery(e.target.value)}
+
+            placeholder="Search prompt, model..."
+
+            className="w-full pl-6 pr-6 py-1 rounded-lg bg-[#0d0e14] border border-white/10 text-[10px] font-mono text-gray-300 placeholder:text-gray-600 focus:outline-none focus:border-indigo-500/50 transition"
+
+          />
+
+          {gallerySearchQuery && (
+
+            <button
+
+              type="button"
+
+              onClick={() => setGallerySearchQuery('')}
+
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white"
+
+              title="Clear search"
+
+            >
+
+              <X className="w-3 h-3" />
+
+            </button>
+
+          )}
+
+        </div>
 
 
 
@@ -9137,7 +9597,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
           <div className="col-span-full text-center py-8 text-gray-500 flex flex-col items-center gap-2">
 
-            <span>No gallery images found for this view.</span>
+            <span>{gallerySearchQuery ? `No images match "${gallerySearchQuery}".` : 'No gallery images found for this view.'}</span>
 
             <button
 
@@ -11089,6 +11549,8 @@ export const Workspace: React.FC = () => {
 
   const [showCommandPalette, setShowCommandPalette] = useState(false);
 
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
+
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -11225,6 +11687,18 @@ export const Workspace: React.FC = () => {
 
         if (showCommandPalette) setShowCommandPalette(false);
 
+        else if (showShortcutsModal) setShowShortcutsModal(false);
+
+        return;
+
+      }
+
+      if (event.key === '?' && !editing) {
+
+        event.preventDefault();
+
+        setShowShortcutsModal((prev) => !prev);
+
         return;
 
       }
@@ -11251,7 +11725,7 @@ export const Workspace: React.FC = () => {
 
     return () => window.removeEventListener('keydown', onShortcut);
 
-  }, [enqueueAndProcess, showCommandPalette]);
+  }, [enqueueAndProcess, showCommandPalette, showShortcutsModal]);
 
 
 
@@ -11645,6 +12119,7 @@ export const Workspace: React.FC = () => {
     { id: 'history', label: 'Open History', description: 'Browse recent generations', icon: defaultCommandIcons.history, action: () => addPanel('history', 'Output History') },
 
     { id: 'settings', label: 'Open settings', description: 'Preferences and persistence controls', icon: defaultCommandIcons.settings, action: () => setShowSettingsModal(true) },
+    { id: 'shortcuts', label: 'Keyboard shortcuts', description: 'View all keyboard and mouse shortcuts', icon: defaultCommandIcons.settings, action: () => setShowShortcutsModal(true) },
 
     { id: 'fit', label: 'Fit viewport', description: 'Fit the current image to the viewport', icon: defaultCommandIcons.fit, action: () => window.dispatchEvent(new Event('swarm-fit-viewport')) },
 
@@ -11974,6 +12449,12 @@ export const Workspace: React.FC = () => {
             <InfoPopover content="Open application preferences, font scaling, gallery behavior, tag organization and persistence controls." side="bottom" className="sc-popover-button-trigger">
               <button type="button" onClick={() => setShowSettingsModal(true)} className="sc-topbar-icon-button p-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg cursor-pointer" title="Options">
                 <Settings className="w-3.5 h-3.5" />
+              </button>
+            </InfoPopover>
+
+            <InfoPopover content="View all keyboard and mouse shortcuts, including prompt-editing and canvas controls." side="bottom" className="sc-popover-button-trigger">
+              <button type="button" onClick={() => setShowShortcutsModal(true)} className="sc-topbar-icon-button p-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-lg cursor-pointer" title="Keyboard shortcuts (?)">
+                <Keyboard className="w-3.5 h-3.5" />
               </button>
             </InfoPopover>
 
@@ -12759,6 +13240,122 @@ export const Workspace: React.FC = () => {
               </button>
 
             </div>
+
+          </div>
+
+        </div>
+
+      )}
+
+
+
+      {showShortcutsModal && (
+
+        <div className="fixed inset-0 z-999999 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sc-dialog-backdrop" onClick={() => setShowShortcutsModal(false)}>
+
+          <div
+
+            className="sc-dialog-card w-104 max-h-[80vh] overflow-y-auto bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 text-xs text-gray-200 flex flex-col gap-3"
+
+            onClick={(e) => e.stopPropagation()}
+
+          >
+
+            <div className="flex justify-between items-center border-b border-[#252a38] pb-2 font-semibold text-sm text-indigo-400">
+
+              <span className="flex items-center gap-2"><Keyboard className="w-4 h-4" /> Keyboard & Mouse Shortcuts</span>
+
+              <button onClick={() => setShowShortcutsModal(false)} className="text-gray-500 hover:text-white text-base">✕</button>
+
+            </div>
+
+
+
+            {[
+
+              {
+
+                title: 'Global',
+
+                rows: [
+
+                  ['Ctrl / Cmd + K', 'Open command palette'],
+
+                  ['Ctrl / Cmd + Enter', 'Queue current prompt & start generating'],
+
+                  ['F', 'Fit viewport image to screen'],
+
+                  ['?', 'Toggle this shortcuts panel'],
+
+                  ['Esc', 'Close command palette / this panel'],
+
+                ],
+
+              },
+
+              {
+
+                title: 'Prompt Editing (Pills mode)',
+
+                rows: [
+
+                  ['Scroll on a tag', 'Adjust weight (±0.20 per step)'],
+
+                  ['Scroll on a LoRA pill', 'Adjust LoRA weight, preserving <lora:name:weight> syntax'],
+
+                  ['Click a tag', 'Edit tag text'],
+
+                  ['Double-click a tag', 'Mute / re-enable the tag'],
+
+                  ['Drag a tag', 'Reorder, or drag across tags to multi-select'],
+
+                  ['Enter / ,', 'Commit the tag you are typing'],
+
+                  ['Backspace (empty input)', 'Remove the last tag'],
+
+                ],
+
+              },
+
+              {
+
+                title: 'Canvas Viewport',
+
+                rows: [
+
+                  ['Scroll', 'Zoom in / out'],
+
+                  ['Click + drag', 'Pan the canvas'],
+
+                ],
+
+              },
+
+            ].map((section) => (
+
+              <div key={section.title} className="sc-settings-section">
+
+                <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">{section.title}</span>
+
+                <div className="flex flex-col gap-1 mt-1.5">
+
+                  {section.rows.map(([keys, desc]) => (
+
+                    <div key={keys} className="flex items-center justify-between gap-3 py-1 px-2 rounded-lg bg-[#12141c] border border-[#252938]">
+
+                      <span className="text-gray-400">{desc}</span>
+
+                      <kbd className="shrink-0 px-1.5 py-0.5 rounded bg-[#232633] border border-[#333850] font-mono text-[10px] text-amber-200 whitespace-nowrap">{keys}</kbd>
+
+                    </div>
+
+                  ))}
+
+                </div>
+
+              </div>
+
+            ))}
 
           </div>
 
