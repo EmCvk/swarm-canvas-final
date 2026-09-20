@@ -73,13 +73,15 @@ import { swarmClient, emitDiagnostic } from '../api/swarmClient';
 
 import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken, extractPromptLoras } from '../utils/promptWeights';
 
+import { matchesGenerationQuery } from '../utils/historySearch';
+
 import { emitToast } from '../utils/toast';
 
 import {
 
   Wand2, Plus, Clock, Gauge, Command as CommandIcon, ArrowDownUp,
 
-  RotateCw, Search, Layers, Sparkle, LayoutGrid,
+  RotateCw, Search, Layers, Sparkle, LayoutGrid, RefreshCw,
 
   Box, ZoomIn, ZoomOut, Maximize2, Minimize2,
 
@@ -95,7 +97,7 @@ import {
 
   Star, Info, Volume2, Play, Sparkles, Crop, Type, Move, GripVertical,
 
-  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X, Keyboard
+  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X, Keyboard, GitBranch, Network
 
 } from 'lucide-react';
 
@@ -620,18 +622,39 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
     prompt: s.prompt, startNewBatch: s.startNewBatch, createNewEmptyBatch: s.createNewEmptyBatch,
     moveJobToBatch: s.moveJobToBatch, duplicateQueuedItem: s.duplicateQueuedItem, addVariationToBatch: s.addVariationToBatch,
     removeBatchFromQueue: s.removeBatchFromQueue, reorderQueue: s.reorderQueue, cancelQueuedJob: s.cancelQueuedJob, clearQueue: s.clearQueue,
+    previewHistory: s.previewHistory, generationStartedAt: s.generationStartedAt,
   })));
 
   const {
     activeImage, livePreview, isGenerating, currentStep, maxSteps, progressPercent, metrics, setParams,
     comparisonImage, isComparing, compareSplit, setIsComparing, setComparisonImage, setCompareSplit, history,
     cancelGeneration, settings, updateSettings, enqueueAndProcess, startQueueProcessing,
-    lastFailedJob, retryFailedJob, clearFailedJob, setActiveContextMenu
+    lastFailedJob, retryFailedJob, clearFailedJob, setActiveContextMenu, previewHistory, generationStartedAt,
+    isQueuePaused, setIsQueuePaused,
   } = store;
 
   const queue: any[] = store.queue || [];
   const activeJob: any = store.activeJob || null;
   const emptyBatches: string[] = store.emptyBatches || [];
+
+  const [scrubFrameIndex, setScrubFrameIndex] = useState<number | null>(null);
+  const [monitorElapsedMs, setMonitorElapsedMs] = useState(0);
+
+  useEffect(() => {
+    if (!isGenerating || !generationStartedAt) { setMonitorElapsedMs(0); return; }
+    const tick = () => setMonitorElapsedMs(Date.now() - generationStartedAt);
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [isGenerating, generationStartedAt]);
+
+  useEffect(() => {
+    // Snap the scrub view back to live whenever a fresh job starts.
+    if (isGenerating && currentStep <= 1) setScrubFrameIndex(null);
+  }, [isGenerating, currentStep]);
+
+  const queuePosition = activeJob ? queue.length + 1 : 0;
+  const totalRemainingJobs = queue.length + (activeJob ? 1 : 0);
 
 
 
@@ -673,9 +696,14 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  // During generation: in live mode, show livePreview or fall back to dimmed activeImage with progress overlay
+  // During generation: in live mode, show livePreview or fall back to dimmed activeImage with progress overlay.
+  // A scrubbed frame (from the preview-history strip) takes priority over the live frame.
 
-  const displayImage = isGenerating
+  const displayImage = scrubFrameIndex !== null && previewHistory[scrubFrameIndex]
+
+    ? previewHistory[scrubFrameIndex]
+
+    : isGenerating
 
     ? (viewportMode === 'static' ? activeImage : (livePreview || activeImage))
 
@@ -1110,12 +1138,12 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
       className="sc-themed-viewport h-full w-full relative flex flex-col items-center justify-center overflow-hidden select-none"
 
       onWheel={(e) => {
-        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *, .sc-live-monitor, .sc-live-monitor *')) return;
         handleWheel(e);
       }}
 
       onMouseDown={(e) => {
-        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *, .sc-live-monitor, .sc-live-monitor *')) return;
         handleMouseDown(e);
       }}
 
@@ -1177,15 +1205,155 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-            {/* Real-Time Live Preview Sampling Badge */}
+            {/* Live Generation Monitor */}
 
-            {isGenerating && viewportMode === 'live' && (
+            {(isGenerating || (scrubFrameIndex !== null && previewHistory.length > 0)) && viewportMode === 'live' && (
 
-              <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/82 backdrop-blur-md px-3 py-1.5 rounded-lg text-emerald-200 font-mono text-[10px] shadow-lg pointer-events-none">
+              <div className="sc-live-monitor absolute top-3 left-3 right-3 max-w-sm flex flex-col gap-1.5 bg-black/85 backdrop-blur-md px-3 py-2.5 rounded-xl text-emerald-200 font-mono text-[10px] shadow-lg">
 
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <div className="flex items-center justify-between gap-2">
 
-                <div className="flex flex-col"><span className="font-semibold">{livePreview ? 'LIVE PREVIEW' : (metrics.stage || 'PREPARING')}</span><span className="text-zinc-400">{currentStep} / {maxSteps} · {progressPercent}%{metrics.speed !== null ? ` · ${metrics.speed} it/s` : ''}</span></div>
+                  <div className="flex items-center gap-2 min-w-0">
+
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${isGenerating ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+
+                    <span className="font-semibold truncate">
+
+                      {scrubFrameIndex !== null ? `PREVIEW FRAME ${scrubFrameIndex + 1} / ${previewHistory.length}` : (livePreview ? 'LIVE PREVIEW' : (metrics.stage || 'PREPARING'))}
+
+                    </span>
+
+                  </div>
+
+                  {isGenerating && (
+
+                    <button
+
+                      type="button"
+
+                      onClick={(e) => { e.stopPropagation(); cancelGeneration(); }}
+
+                      className="shrink-0 px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-700/60 text-rose-300 hover:bg-rose-900/60 transition cursor-pointer"
+
+                      title="Cancel current generation"
+
+                    >
+
+                      Cancel
+
+                    </button>
+
+                  )}
+
+                </div>
+
+
+
+                <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+
+                  <div
+
+                    className="h-full bg-emerald-400 transition-[width] duration-150 ease-out"
+
+                    style={{ width: `${Math.max(2, progressPercent)}%` }}
+
+                  />
+
+                </div>
+
+
+
+                <div className="flex items-center justify-between text-zinc-400 flex-wrap gap-x-2">
+
+                  <span>Step {currentStep} / {maxSteps} · {progressPercent}%</span>
+
+                  {metrics.speed !== null && <span>{metrics.speed} it/s</span>}
+
+                  {metrics.eta !== null && isGenerating && <span>ETA {metrics.eta}s</span>}
+
+                  {isGenerating && <span>Elapsed {(monitorElapsedMs / 1000).toFixed(1)}s</span>}
+
+                </div>
+
+
+
+                {(totalRemainingJobs > 1 || isQueuePaused) && (
+
+                  <div className="flex items-center justify-between text-zinc-500 border-t border-white/10 pt-1.5 mt-0.5">
+
+                    <span>{queuePosition > 0 ? `Job ${queuePosition} of ${totalRemainingJobs} in queue` : `${totalRemainingJobs} job(s) queued`}</span>
+
+                    <button
+
+                      type="button"
+
+                      onClick={(e) => { e.stopPropagation(); setIsQueuePaused(!isQueuePaused); }}
+
+                      className={`px-1.5 py-0.5 rounded border transition cursor-pointer ${isQueuePaused ? 'bg-amber-950/50 border-amber-600/50 text-amber-300' : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'}`}
+
+                      title={isQueuePaused ? 'Resume queue after this job' : 'Pause queue after this job'}
+
+                    >
+
+                      {isQueuePaused ? 'Resume after this' : 'Pause after this'}
+
+                    </button>
+
+                  </div>
+
+                )}
+
+
+
+                {previewHistory.length > 1 && (
+
+                  <div className="flex items-center gap-1 overflow-x-auto pt-1 border-t border-white/10 mt-0.5">
+
+                    {previewHistory.map((frame, idx) => (
+
+                      <button
+
+                        key={idx}
+
+                        type="button"
+
+                        onClick={(e) => { e.stopPropagation(); setScrubFrameIndex(idx === scrubFrameIndex ? null : idx); }}
+
+                        className={`shrink-0 w-8 h-8 rounded overflow-hidden border-2 transition ${scrubFrameIndex === idx ? 'border-emerald-400' : 'border-transparent opacity-60 hover:opacity-100'}`}
+
+                        title={`Frame ${idx + 1}`}
+
+                      >
+
+                        <img src={frame} className="w-full h-full object-cover" />
+
+                      </button>
+
+                    ))}
+
+                    {scrubFrameIndex !== null && (
+
+                      <button
+
+                        type="button"
+
+                        onClick={(e) => { e.stopPropagation(); setScrubFrameIndex(null); }}
+
+                        className="shrink-0 ml-1 px-1.5 py-1 rounded bg-emerald-950/50 border border-emerald-600/50 text-emerald-300 hover:bg-emerald-900/50 transition"
+
+                        title="Back to live"
+
+                      >
+
+                        Live
+
+                      </button>
+
+                    )}
+
+                  </div>
+
+                )}
 
               </div>
 
@@ -1613,8 +1781,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <InfoPopover content="Adds the current prompt and parameters to the end of the queue and starts processing if nothing is running. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="left" className="sc-popover-button-trigger">
-          <button
+        <button
             type="button"
             onClick={() => void enqueueAndProcess()}
             className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
@@ -1623,7 +1790,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
             <Plus className="w-3.5 h-3.5 text-blue-300" />
             <span>Queue</span>
           </button>
-        </InfoPopover>
+        
 
       </div>
 
@@ -1883,6 +2050,12 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                 <div className="flex items-center gap-2 text-rose-200 text-[10px] font-mono font-bold"><AlertTriangle className="w-3.5 h-3.5" /> LAST GENERATION FAILED</div>
 
                 <div className="mt-1 text-[10px] text-zinc-400 truncate" title={lastFailedJob.prompt}>{lastFailedJob.prompt}</div>
+
+                {metrics.stage && metrics.stage.startsWith('Error:') && (
+
+                  <div className="mt-1 text-[10px] text-rose-300/80 font-mono break-words" title={metrics.stage}>{metrics.stage}</div>
+
+                )}
 
                 <div className="flex flex-wrap items-center gap-1.5 mt-2">
 
@@ -8617,15 +8790,37 @@ const MetadataModal: React.FC<{ item: HistoryItem | null; onClose: () => void }>
 
 const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
-  const { history, sessionStartTime, setParams, useGenerationParams, setComparisonImage, settings, updateSettings, deleteHistoryItem, setActiveContextMenu, toggleFavorite } = useAppStore(useShallow((s) => ({
+  const {
+    history, sessionStartTime, setParams, useGenerationParams, setComparisonImage, settings, updateSettings,
+    deleteHistoryItem, setActiveContextMenu, toggleFavorite, rerollFromHistory, branchFromHistory,
+    getLineageAncestors, getLineageChildren,
+  } = useAppStore(useShallow((s) => ({
 
     history: s.history, sessionStartTime: s.sessionStartTime, setParams: s.setParams, useGenerationParams: s.useGenerationParams,
 
     setComparisonImage: s.setComparisonImage, settings: s.settings, updateSettings: s.updateSettings, deleteHistoryItem: s.deleteHistoryItem,
 
     setActiveContextMenu: s.setActiveContextMenu, toggleFavorite: s.toggleFavorite,
+    rerollFromHistory: s.rerollFromHistory, branchFromHistory: s.branchFromHistory,
+    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren,
 
   })));
+
+  const [lineageFocusId, setLineageFocusId] = useState<string | null>(null);
+
+  const childCountById = useMemo(() => {
+
+    const counts = new Map<string, number>();
+
+    history.forEach((h) => {
+
+      if (h.parentId) counts.set(h.parentId, (counts.get(h.parentId) || 0) + 1);
+
+    });
+
+    return counts;
+
+  }, [history]);
 
   const viewMode = settings.panelViewModes?.history || 'cards';
 
@@ -8655,8 +8850,6 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const sessionHistory = useMemo(() => {
 
-    const query = historySearchQuery.trim().toLowerCase();
-
     const filtered = history
 
       .filter((item: any) => {
@@ -8669,19 +8862,11 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
       .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
 
-      .filter((item) => {
-
-        if (!query) return true;
-
-        const haystack = `${item.prompt || ''} ${item.negativePrompt || ''} ${item.params?.model || ''} ${item.params?.seed ?? ''}`.toLowerCase();
-
-        return haystack.includes(query);
-
-      });
+      .filter((item) => matchesGenerationQuery(item, historySearchQuery));
 
 
 
-    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly && !query) {
+    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly && !historySearchQuery.trim()) {
 
       return history.slice(0, 100);
 
@@ -8769,6 +8954,36 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
       {
 
+        label: 'Reroll (new variation)',
+
+        icon: <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />,
+
+        action: () => rerollFromHistory(item)
+
+      },
+
+      {
+
+        label: 'Branch from here',
+
+        icon: <GitBranch className="w-3.5 h-3.5 text-violet-400" />,
+
+        action: () => branchFromHistory(item)
+
+      },
+
+      {
+
+        label: item.parentId || childCountById.get(item.id) ? `View Lineage${childCountById.get(item.id) ? ` (${childCountById.get(item.id)} variation${childCountById.get(item.id) === 1 ? '' : 's'})` : ''}` : 'View Lineage',
+
+        icon: <Network className="w-3.5 h-3.5 text-amber-400" />,
+
+        action: () => setLineageFocusId(item.id)
+
+      },
+
+      {
+
         label: 'Set as Comparison Image (B)',
 
         icon: <SplitSquareVertical className="w-3.5 h-3.5 text-indigo-400" />,
@@ -8841,7 +9056,9 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
             onChange={(e) => setHistorySearchQuery(e.target.value)}
 
-            placeholder="Search prompt, model, seed..."
+            placeholder="Search, or model:x lora:y seed:z tag:w before:2026-01-01"
+
+            title="Supports model:, lora:, seed:, tag:, before:, after: filters, combined with plain text"
 
             className="w-full pl-6 pr-6 py-1 rounded-lg bg-[#0d0e14] border border-white/10 text-[10px] font-mono text-gray-300 placeholder:text-gray-600 focus:outline-none focus:border-indigo-500/50 transition"
 
@@ -9097,6 +9314,32 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
                         </button>
 
+                        {(item.parentId || childCountById.get(item.id)) ? (
+
+                          <button
+
+                            onClick={(e) => {
+
+                              e.stopPropagation();
+
+                              setLineageFocusId(item.id);
+
+                            }}
+
+                            title={childCountById.get(item.id) ? `${childCountById.get(item.id)} variation(s) - view lineage` : 'Branched from another generation - view lineage'}
+
+                            className="absolute top-1 left-1 px-1 py-0.5 rounded-full bg-black/60 hover:bg-black/80 text-amber-300 transition cursor-pointer z-10 flex items-center gap-0.5"
+
+                          >
+
+                            <Network className="w-2.5 h-2.5" />
+
+                            {childCountById.get(item.id) ? <span className="text-[8px] font-mono">{childCountById.get(item.id)}</span> : null}
+
+                          </button>
+
+                        ) : null}
+
                       </div>
 
 
@@ -9185,6 +9428,97 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
       />
 
+
+      {lineageFocusId && (() => {
+        const focused = history.find((h) => h.id === lineageFocusId);
+        if (!focused) return null;
+        const ancestors = getLineageAncestors(lineageFocusId);
+        const children = getLineageChildren(lineageFocusId);
+        return (
+          <div className="fixed inset-0 z-999999 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 sc-dialog-backdrop" onClick={() => setLineageFocusId(null)}>
+            <div className="sc-dialog-card w-full max-w-3xl max-h-[85vh] overflow-y-auto bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 flex flex-col gap-3 text-xs" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-[#252a38] pb-2">
+                <span className="flex items-center gap-2 font-semibold text-sm text-amber-400">
+                  <Network className="w-4 h-4" /> Generation Lineage
+                </span>
+                <button onClick={() => setLineageFocusId(null)} className="text-gray-500 hover:text-white text-base">✕</button>
+              </div>
+
+              {ancestors.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap text-[10px] font-mono text-gray-500">
+                  {ancestors.map((a, i) => (
+                    <React.Fragment key={a.id}>
+                      {i > 0 && <ChevronRight className="w-3 h-3" />}
+                      <button onClick={() => setLineageFocusId(a.id)} className="hover:text-amber-300 underline decoration-dotted underline-offset-2 truncate max-w-32">
+                        {a.prompt.slice(0, 24) || 'Generation'}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-gray-300">This generation</span>
+                </div>
+              )}
+
+              <div className="flex gap-3 p-2.5 rounded-xl bg-[#12141c] border border-amber-500/30">
+                <img src={resolveImageUrl(focused.imageUrl)} className="w-24 h-24 object-cover rounded-lg shrink-0 border border-white/10" />
+                <div className="flex flex-col gap-1 min-w-0 flex-1">
+                  <span className="text-gray-300 font-mono text-[11px] line-clamp-2">{focused.prompt || '(empty prompt)'}</span>
+                  <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                    <span className="px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-sky-300">{focused.params.model?.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'unknown model'}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-zinc-400">{focused.params.width}×{focused.params.height} · seed {focused.params.seed}</span>
+                    {focused.relation && (
+                      <span className="px-1.5 py-0.5 rounded bg-violet-950/40 border border-violet-500/40 text-[9px] font-mono text-violet-300 capitalize">{focused.relation} of parent</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <button onClick={() => rerollFromHistory(focused)} className="px-2 py-1 rounded-lg bg-cyan-950/40 border border-cyan-700/50 text-cyan-300 hover:bg-cyan-900/50 transition flex items-center gap-1">
+                      <RefreshCw className="w-3 h-3" /> Reroll
+                    </button>
+                    <button onClick={() => { branchFromHistory(focused); setLineageFocusId(null); }} className="px-2 py-1 rounded-lg bg-violet-950/40 border border-violet-700/50 text-violet-300 hover:bg-violet-900/50 transition flex items-center gap-1">
+                      <GitBranch className="w-3 h-3" /> Branch & Edit
+                    </button>
+                    <button onClick={() => setParams({ activeImage: resolveImageUrl(focused.imageUrl) })} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 transition flex items-center gap-1">
+                      <Maximize2 className="w-3 h-3" /> View
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">
+                  Variations ({children.length})
+                </span>
+              </div>
+
+              {children.length === 0 ? (
+                <div className="text-center py-6 text-gray-600 text-[11px]">
+                  No variations yet - use Reroll or Branch above to create one.
+                </div>
+              ) : (
+                <div className="grid grid-cols-4 gap-2">
+                  {children.map((child) => (
+                    <button
+                      key={child.id}
+                      onClick={() => setLineageFocusId(child.id)}
+                      className="group relative rounded-lg overflow-hidden border border-white/10 hover:border-amber-500/60 transition aspect-square"
+                      title={child.prompt}
+                    >
+                      <img src={resolveImageUrl(child.imageUrl)} className="w-full h-full object-cover" />
+                      <div className="absolute inset-x-0 bottom-0 bg-black/70 px-1 py-0.5 flex items-center justify-between">
+                        <span className="text-[8px] font-mono text-gray-300 capitalize">{child.relation || 'variation'}</span>
+                        {childCountById.get(child.id) ? (
+                          <span className="text-[8px] font-mono text-amber-300">+{childCountById.get(child.id)}</span>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
     </div>
 
   );
@@ -9207,7 +9541,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
     deleteHistoryItem, setActiveContextMenu, syncServerGallery, settings, updateSettings,
 
-    galleryCurrentPage, setGalleryCurrentPage, toggleFavorite
+    galleryCurrentPage, setGalleryCurrentPage, toggleFavorite,
+    rerollFromHistory, branchFromHistory, getLineageAncestors, getLineageChildren,
 
   } = useAppStore(useShallow((s) => ({
 
@@ -9218,8 +9553,26 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
     syncServerGallery: s.syncServerGallery, settings: s.settings, updateSettings: s.updateSettings, galleryCurrentPage: s.galleryCurrentPage,
 
     setGalleryCurrentPage: s.setGalleryCurrentPage, toggleFavorite: s.toggleFavorite,
+    rerollFromHistory: s.rerollFromHistory, branchFromHistory: s.branchFromHistory,
+    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren,
 
   })));
+
+  const [lineageFocusId, setLineageFocusId] = useState<string | null>(null);
+
+  const childCountById = useMemo(() => {
+
+    const counts = new Map<string, number>();
+
+    history.forEach((h) => {
+
+      if (h.parentId) counts.set(h.parentId, (counts.get(h.parentId) || 0) + 1);
+
+    });
+
+    return counts;
+
+  }, [history]);
 
   const viewMode = settings.panelViewModes?.gallery || 'cards';
 
@@ -9257,21 +9610,11 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const filteredGallery = useMemo(() => {
 
-    const query = gallerySearchQuery.trim().toLowerCase();
-
     return rawDataset
 
       .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
 
-      .filter((item: any) => {
-
-        if (!query) return true;
-
-        const haystack = `${item.prompt || ''} ${item.negativePrompt || ''} ${item.params?.model || ''} ${item.params?.seed ?? ''}`.toLowerCase();
-
-        return haystack.includes(query);
-
-      });
+      .filter((item) => matchesGenerationQuery(item, gallerySearchQuery));
 
   }, [rawDataset, showFavoritesOnly, gallerySearchQuery]);
 
@@ -9316,6 +9659,36 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
         icon: <Check className="w-3.5 h-3.5 text-emerald-400" />,
 
         action: () => useGenerationParams(item)
+
+      },
+
+      {
+
+        label: 'Reroll (new variation)',
+
+        icon: <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />,
+
+        action: () => rerollFromHistory(item)
+
+      },
+
+      {
+
+        label: 'Branch from here',
+
+        icon: <GitBranch className="w-3.5 h-3.5 text-violet-400" />,
+
+        action: () => branchFromHistory(item)
+
+      },
+
+      {
+
+        label: item.parentId || childCountById.get(item.id) ? `View Lineage${childCountById.get(item.id) ? ` (${childCountById.get(item.id)} variation${childCountById.get(item.id) === 1 ? '' : 's'})` : ''}` : 'View Lineage',
+
+        icon: <Network className="w-3.5 h-3.5 text-amber-400" />,
+
+        action: () => setLineageFocusId(item.id)
 
       },
 
@@ -9401,7 +9774,9 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
             onChange={(e) => setGallerySearchQuery(e.target.value)}
 
-            placeholder="Search prompt, model..."
+            placeholder="model:x lora:y seed:z tag:w..."
+
+            title="Supports model:, lora:, seed:, tag:, before:, after: filters, combined with plain text"
 
             className="w-full pl-6 pr-6 py-1 rounded-lg bg-[#0d0e14] border border-white/10 text-[10px] font-mono text-gray-300 placeholder:text-gray-600 focus:outline-none focus:border-indigo-500/50 transition"
 
@@ -9699,6 +10074,32 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
                   </button>
 
+                  {(item.parentId || childCountById.get(item.id)) ? (
+
+                    <button
+
+                      onClick={(e) => {
+
+                        e.stopPropagation();
+
+                        setLineageFocusId(item.id);
+
+                      }}
+
+                      title={childCountById.get(item.id) ? `${childCountById.get(item.id)} variation(s) - view lineage` : 'Branched from another generation - view lineage'}
+
+                      className="absolute top-1 left-1 px-1 py-0.5 rounded-full bg-black/60 hover:bg-black/80 text-amber-300 transition cursor-pointer z-10 flex items-center gap-0.5"
+
+                    >
+
+                      <Network className="w-2.5 h-2.5" />
+
+                      {childCountById.get(item.id) ? <span className="text-[8px] font-mono">{childCountById.get(item.id)}</span> : null}
+
+                    </button>
+
+                  ) : null}
+
                 </div>
 
 
@@ -9826,6 +10227,97 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
         onClose={() => setSelectedMetaItem(null)}
 
       />
+
+
+      {lineageFocusId && (() => {
+        const focused = history.find((h) => h.id === lineageFocusId);
+        if (!focused) return null;
+        const ancestors = getLineageAncestors(lineageFocusId);
+        const children = getLineageChildren(lineageFocusId);
+        return (
+          <div className="fixed inset-0 z-999999 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 sc-dialog-backdrop" onClick={() => setLineageFocusId(null)}>
+            <div className="sc-dialog-card w-full max-w-3xl max-h-[85vh] overflow-y-auto bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 flex flex-col gap-3 text-xs" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-[#252a38] pb-2">
+                <span className="flex items-center gap-2 font-semibold text-sm text-amber-400">
+                  <Network className="w-4 h-4" /> Generation Lineage
+                </span>
+                <button onClick={() => setLineageFocusId(null)} className="text-gray-500 hover:text-white text-base">✕</button>
+              </div>
+
+              {ancestors.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap text-[10px] font-mono text-gray-500">
+                  {ancestors.map((a, i) => (
+                    <React.Fragment key={a.id}>
+                      {i > 0 && <ChevronRight className="w-3 h-3" />}
+                      <button onClick={() => setLineageFocusId(a.id)} className="hover:text-amber-300 underline decoration-dotted underline-offset-2 truncate max-w-32">
+                        {a.prompt.slice(0, 24) || 'Generation'}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                  <ChevronRight className="w-3 h-3" />
+                  <span className="text-gray-300">This generation</span>
+                </div>
+              )}
+
+              <div className="flex gap-3 p-2.5 rounded-xl bg-[#12141c] border border-amber-500/30">
+                <img src={resolveImageUrl(focused.imageUrl)} className="w-24 h-24 object-cover rounded-lg shrink-0 border border-white/10" />
+                <div className="flex flex-col gap-1 min-w-0 flex-1">
+                  <span className="text-gray-300 font-mono text-[11px] line-clamp-2">{focused.prompt || '(empty prompt)'}</span>
+                  <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                    <span className="px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-sky-300">{focused.params.model?.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'unknown model'}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-[#1c2030] border border-[#2b2f42] text-[9px] font-mono text-zinc-400">{focused.params.width}×{focused.params.height} · seed {focused.params.seed}</span>
+                    {focused.relation && (
+                      <span className="px-1.5 py-0.5 rounded bg-violet-950/40 border border-violet-500/40 text-[9px] font-mono text-violet-300 capitalize">{focused.relation} of parent</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <button onClick={() => rerollFromHistory(focused)} className="px-2 py-1 rounded-lg bg-cyan-950/40 border border-cyan-700/50 text-cyan-300 hover:bg-cyan-900/50 transition flex items-center gap-1">
+                      <RefreshCw className="w-3 h-3" /> Reroll
+                    </button>
+                    <button onClick={() => { branchFromHistory(focused); setLineageFocusId(null); }} className="px-2 py-1 rounded-lg bg-violet-950/40 border border-violet-700/50 text-violet-300 hover:bg-violet-900/50 transition flex items-center gap-1">
+                      <GitBranch className="w-3 h-3" /> Branch & Edit
+                    </button>
+                    <button onClick={() => setParams({ activeImage: resolveImageUrl(focused.imageUrl) })} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 transition flex items-center gap-1">
+                      <Maximize2 className="w-3 h-3" /> View
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">
+                  Variations ({children.length})
+                </span>
+              </div>
+
+              {children.length === 0 ? (
+                <div className="text-center py-6 text-gray-600 text-[11px]">
+                  No variations yet - use Reroll or Branch above to create one.
+                </div>
+              ) : (
+                <div className="grid grid-cols-4 gap-2">
+                  {children.map((child) => (
+                    <button
+                      key={child.id}
+                      onClick={() => setLineageFocusId(child.id)}
+                      className="group relative rounded-lg overflow-hidden border border-white/10 hover:border-amber-500/60 transition aspect-square"
+                      title={child.prompt}
+                    >
+                      <img src={resolveImageUrl(child.imageUrl)} className="w-full h-full object-cover" />
+                      <div className="absolute inset-x-0 bottom-0 bg-black/70 px-1 py-0.5 flex items-center justify-between">
+                        <span className="text-[8px] font-mono text-gray-300 capitalize">{child.relation || 'variation'}</span>
+                        {childCountById.get(child.id) ? (
+                          <span className="text-[8px] font-mono text-amber-300">+{childCountById.get(child.id)}</span>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
     </div>
 
@@ -11505,13 +11997,27 @@ export const Workspace: React.FC = () => {
   const {
     settings, updateSettings, setSectionScale, setPrompt, setNegativePrompt, activeContextMenu,
     setActiveContextMenu, isGenerating, isConnected, queue, activeJob, modelsList, cancelGeneration,
-    enqueueAndProcess, queueCurrentGeneration
+    enqueueAndProcess, queueCurrentGeneration, recoveredQueueSize, dismissRecoveredQueue,
+    startQueueProcessing, clearQueue,
   } = useAppStore(useShallow((s) => ({
     settings: s.settings, updateSettings: s.updateSettings, setSectionScale: s.setSectionScale, setPrompt: s.setPrompt,
     setNegativePrompt: s.setNegativePrompt, activeContextMenu: s.activeContextMenu, setActiveContextMenu: s.setActiveContextMenu,
     isGenerating: s.isGenerating, isConnected: s.isConnected, queue: s.queue, activeJob: s.activeJob, modelsList: s.modelsList,
     cancelGeneration: s.cancelGeneration, enqueueAndProcess: s.enqueueAndProcess, queueCurrentGeneration: s.queueCurrentGeneration,
+    recoveredQueueSize: s.recoveredQueueSize, dismissRecoveredQueue: s.dismissRecoveredQueue,
+    startQueueProcessing: s.startQueueProcessing, clearQueue: s.clearQueue,
   })));
+
+  // Crash/refresh recovery: a leftover queue was loaded back in. Auto-resume if the user has
+  // opted into that, otherwise leave the banner up until they choose Resume or Discard.
+  useEffect(() => {
+    if (recoveredQueueSize && settings.autoResumeQueueOnLaunch) {
+      dismissRecoveredQueue();
+      void startQueueProcessing();
+    }
+    // Only ever fires once per app load, right after hydration sets recoveredQueueSize.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
 
 
@@ -13388,6 +13894,70 @@ export const Workspace: React.FC = () => {
           </div>
 
           <button type="button" onClick={() => { setShowConsole(true); setShowDiagnostics(false); }} className="w-full mt-3 rounded-lg px-2 py-1.5 bg-white/5 hover:bg-white/10 text-zinc-300 text-[10px]">Open diagnostics console</button>
+
+        </div>
+
+      )}
+
+
+
+      {recoveredQueueSize !== null && (
+
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-[1000002] flex items-center gap-3 bg-[#1d1f21] border border-amber-600/40 rounded-xl px-4 py-2.5 shadow-2xl text-xs">
+
+          <Layers className="w-4 h-4 text-amber-400 shrink-0" />
+
+          <span className="text-zinc-200">
+
+            Recovered <span className="font-semibold text-amber-300">{recoveredQueueSize}</span> queued job{recoveredQueueSize === 1 ? '' : 's'} from your last session.
+
+          </span>
+
+          <button
+
+            type="button"
+
+            onClick={() => { dismissRecoveredQueue(); void startQueueProcessing(); }}
+
+            className="px-2 py-1 rounded-lg bg-emerald-950/50 border border-emerald-600/50 text-emerald-300 hover:bg-emerald-900/50 transition cursor-pointer"
+
+          >
+
+            Resume
+
+          </button>
+
+          <button
+
+            type="button"
+
+            onClick={() => { dismissRecoveredQueue(); clearQueue(); }}
+
+            className="px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-zinc-400 hover:text-white transition cursor-pointer"
+
+          >
+
+            Discard
+
+          </button>
+
+          <label className="flex items-center gap-1.5 text-[10px] text-zinc-500 cursor-pointer border-l border-white/10 pl-3 ml-1">
+
+            <input
+
+              type="checkbox"
+
+              checked={settings.autoResumeQueueOnLaunch}
+
+              onChange={(e) => updateSettings({ autoResumeQueueOnLaunch: e.target.checked })}
+
+              className="cursor-pointer"
+
+            />
+
+            Always resume automatically
+
+          </label>
 
         </div>
 

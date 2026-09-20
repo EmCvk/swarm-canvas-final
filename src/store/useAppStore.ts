@@ -55,6 +55,10 @@ export interface HistoryItem {
   createdAt: string;
   timestamp: number;
   isFavorite?: boolean;
+  /** id of the HistoryItem this generation branched from (reroll / variation / edit), if any. */
+  parentId?: string;
+  /** How this generation relates to its parent - drives the label shown in the lineage view. */
+  relation?: 'variation' | 'branch';
   params: {
     model: string;
     steps: number;
@@ -114,6 +118,9 @@ export interface QueueItem {
   maxSteps?: number;
   createdAt: number;
   aDetailerUnits?: ADetailerUnit[];
+  /** id of the HistoryItem this job branches from, if it was queued via Reroll/Branch. */
+  parentId?: string;
+  relation?: 'variation' | 'branch';
 }
 
 export interface AppSettings {
@@ -150,6 +157,9 @@ export interface AppSettings {
   autoCivitaiScan: boolean;
   galleryPageSize: number;
   gallerySource: 'app' | 'all';
+  /** Crash/refresh recovery: when true, a leftover queue from a previous session resumes
+   *  processing automatically on launch instead of waiting for the user to confirm. */
+  autoResumeQueueOnLaunch: boolean;
 
   // Panel View Mode Preservations
   panelViewModes: {
@@ -290,6 +300,11 @@ export interface AppState {
   currentStep: number;
   maxSteps: number;
   progressPercent: number;
+  /** Recent live-preview frames for this job, oldest first, so the monitor can scrub back
+   *  through the diffusion process instead of only ever showing the latest frame. */
+  previewHistory: string[];
+  /** When the currently-running job started, for a live elapsed-time readout. */
+  generationStartedAt: number | null;
   metrics: {
     stage: string;
     modelLoadTime: number | null;
@@ -319,6 +334,10 @@ export interface AppState {
 
   toggleFavorite: (id: string) => void;
   currentQueueBatchId: string | null;
+  /** Set once when a leftover queue is loaded back in after a crash/refresh; null otherwise.
+   *  Consumed (set back to null) once the user resumes or discards it, or once auto-resumed. */
+  recoveredQueueSize: number | null;
+  dismissRecoveredQueue: () => void;
   activeContextMenu: { x: number; y: number; title: string; items: any[] } | null;
   setActiveContextMenu: (menu: { x: number; y: number; title: string; items: any[] } | null) => void;
 
@@ -346,6 +365,23 @@ export interface AppState {
   clearFailedJob: () => void;
 
   useGenerationParams: (item: HistoryItem) => void;
+
+  /** Generation Graph: id/relation of the HistoryItem the *next* queued generation branches
+   *  from. Set by branchFromHistory, consumed and cleared by queueCurrentGeneration. */
+  pendingParentId: string | null;
+  pendingParentRelation: 'variation' | 'branch' | null;
+  setPendingParent: (parent: { id: string; relation: 'variation' | 'branch' } | null) => void;
+  /** Re-runs a past generation's exact recipe with a fresh random seed, queued immediately
+   *  as a tracked variation (child) of that generation. */
+  rerollFromHistory: (item: HistoryItem) => void;
+  /** Loads a past generation's recipe into the editable prompt/params (like useGenerationParams)
+   *  and marks it as the parent for whatever gets generated next, so the user can freely edit
+   *  before generating while still recording the branch. */
+  branchFromHistory: (item: HistoryItem) => void;
+  /** Walks the parentId chain from `id` back to its root ancestor, returning oldest-first. */
+  getLineageAncestors: (id: string) => HistoryItem[];
+  /** Direct children of a HistoryItem (generations branched from it), newest first. */
+  getLineageChildren: (id: string) => HistoryItem[];
 
   toggleModelFavorite: (type: CivitaiAssetType, name: string) => void;
   toggleModelPinned: (type: CivitaiAssetType, name: string) => void;
@@ -518,6 +554,8 @@ export const useAppStore = create<AppState>()(
       currentStep: 0,
       maxSteps: 28,
       progressPercent: 0,
+      previewHistory: [],
+      generationStartedAt: null,
       metrics: {
         stage: 'Idle',
         modelLoadTime: null,
@@ -602,6 +640,7 @@ export const useAppStore = create<AppState>()(
         autoCivitaiScan: true,
         galleryPageSize: 24,
         gallerySource: 'app',
+        autoResumeQueueOnLaunch: false,
         panelViewModes: {
           extraNetworks: 'cards',
           history: 'cards',
@@ -872,6 +911,10 @@ export const useAppStore = create<AppState>()(
       setCompareSplit: (compareSplit) => set({ compareSplit }),
 
       currentQueueBatchId: null,
+      pendingParentId: null,
+      pendingParentRelation: null,
+      recoveredQueueSize: null,
+      dismissRecoveredQueue: () => set({ recoveredQueueSize: null }),
 
       queueCurrentGeneration: () => {
         const state = get();
@@ -890,6 +933,8 @@ export const useAppStore = create<AppState>()(
         const count = Math.max(1, state.batchCount || 1);
         const activeBatchId = get().currentQueueBatchId || `batch-${Date.now()}`;
         const newJobs: QueueItem[] = [];
+        const branchParentId = state.pendingParentId || undefined;
+        const branchRelation = state.pendingParentRelation || undefined;
 
         for (let i = 0; i < count; i++) {
           newJobs.push({
@@ -914,6 +959,8 @@ export const useAppStore = create<AppState>()(
             maxSteps: state.steps,
             createdAt: Date.now() + i,
             aDetailerUnits: currentADetailer,
+            parentId: branchParentId,
+            relation: branchRelation,
           });
         }
 
@@ -921,6 +968,8 @@ export const useAppStore = create<AppState>()(
           queue: [...s.queue, ...newJobs],
           currentQueueBatchId: activeBatchId,
           emptyBatches: (s.emptyBatches || []).filter((b: string) => b !== activeBatchId),
+          pendingParentId: null,
+          pendingParentRelation: null,
         }));
       },
 
@@ -992,9 +1041,11 @@ export const useAppStore = create<AppState>()(
             queue: remainingQueue,
             activeJob: { ...nextJob, status: 'running' },
             livePreview: null,
+            previewHistory: [],
             currentStep: 0,
             maxSteps: nextJob.steps,
             progressPercent: 0,
+            generationStartedAt: Date.now(),
             metrics: { ...get().metrics, stage: 'Obtaining Session...', totalTime: 0 },
           });
 
@@ -1098,6 +1149,9 @@ export const useAppStore = create<AppState>()(
                     maxSteps: typeof latest.p.max_steps === 'number' && latest.p.max_steps > 0 ? latest.p.max_steps : state.maxSteps,
                     progressPercent: typeof latest.p.percent === 'number' ? Math.min(100, Math.round(latest.p.percent > 1 ? latest.p.percent : latest.p.percent * 100)) : state.progressPercent,
                     livePreview: latest.preview || state.livePreview,
+                    previewHistory: latest.preview && latest.preview !== state.previewHistory[state.previewHistory.length - 1]
+                      ? [...state.previewHistory, latest.preview].slice(-24)
+                      : state.previewHistory,
                     metrics: {
                       stage: latest.p.stage || (latest.p.step ? 'Sampling' : state.metrics.stage),
                       modelLoadTime: state.metrics.modelLoadTime,
@@ -1131,6 +1185,8 @@ export const useAppStore = create<AppState>()(
               negativePrompt: nextJob.negativePrompt,
               createdAt: new Date(now).toLocaleTimeString(),
               timestamp: now,
+              parentId: nextJob.parentId,
+              relation: nextJob.relation,
               params: {
                 model: nextJob.model,
                 steps: nextJob.steps,
@@ -1189,6 +1245,8 @@ export const useAppStore = create<AppState>()(
           activeJob: null,
           currentQueueBatchId: null,
           livePreview: null,
+          previewHistory: [],
+          generationStartedAt: null,
         });
 
         const currentSettings = get().settings;
@@ -1239,7 +1297,7 @@ export const useAppStore = create<AppState>()(
           pendingInterruptPromise = null;
         }
 
-        set({ isGenerating: false, activeJob: null, sessionId: null, livePreview: null, currentQueueBatchId: null, currentStep: 0, progressPercent: 0, metrics: { ...get().metrics, stage: 'Interrupted' } });
+        set({ isGenerating: false, activeJob: null, sessionId: null, livePreview: null, previewHistory: [], generationStartedAt: null, currentQueueBatchId: null, currentStep: 0, progressPercent: 0, metrics: { ...get().metrics, stage: 'Interrupted' } });
         emitToast('Generation cancelled', 'warning');
       },
 
@@ -1313,6 +1371,63 @@ export const useAppStore = create<AppState>()(
           scheduler: item.params.scheduler ?? 'normal',
         }),
 
+      setPendingParent: (parent) => set({
+        pendingParentId: parent?.id ?? null,
+        pendingParentRelation: parent?.relation ?? null,
+      }),
+
+      branchFromHistory: (item) => {
+        get().useGenerationParams(item);
+        get().setPendingParent({ id: item.id, relation: 'branch' });
+        emitToast('Loaded recipe - your next generation will branch from this one', 'info');
+      },
+
+      rerollFromHistory: (item) => {
+        const newSeed = Math.floor(Math.random() * 2147483647);
+        const job: QueueItem = {
+          id: `job-${Date.now()}-reroll-${Math.random().toString(36).slice(2, 6)}`,
+          batchId: `batch-${Date.now()}`,
+          prompt: item.prompt,
+          negativePrompt: item.negativePrompt || '',
+          model: item.params.model,
+          textEncoder: get().textEncoder,
+          textEncoder2: get().textEncoder2,
+          width: item.params.width ?? 832,
+          height: item.params.height ?? 1216,
+          steps: item.params.steps,
+          cfgScale: item.params.cfgScale ?? 6.5,
+          seed: newSeed,
+          sampler: item.params.sampler ?? 'euler_ancestral',
+          scheduler: item.params.scheduler ?? 'normal',
+          status: 'queued',
+          progress: 0,
+          step: 0,
+          maxSteps: item.params.steps,
+          createdAt: Date.now(),
+          parentId: item.id,
+          relation: 'variation',
+        };
+        set((s) => ({ queue: [...s.queue, job] }));
+        void get().startQueueProcessing();
+      },
+
+      getLineageAncestors: (id) => {
+        const byId = new Map(get().history.map((h) => [h.id, h]));
+        const chain: HistoryItem[] = [];
+        let current = byId.get(id)?.parentId ? byId.get(byId.get(id)!.parentId!) : undefined;
+        const seen = new Set<string>();
+        while (current && !seen.has(current.id)) {
+          seen.add(current.id);
+          chain.unshift(current);
+          current = current.parentId ? byId.get(current.parentId) : undefined;
+        }
+        return chain;
+      },
+
+      getLineageChildren: (id) => {
+        return get().history.filter((h) => h.parentId === id).sort((a, b) => b.timestamp - a.timestamp);
+      },
+
       updateControlNet: (id, updates) =>
         set((s) => ({
           controlNetUnits: s.controlNetUnits.map((u) => (u.id === id ? { ...u, ...updates } : u)),
@@ -1382,6 +1497,13 @@ export const useAppStore = create<AppState>()(
         emptyBatches: state.emptyBatches,
         promptPresets: state.promptPresets || [],
         lastFailedJob: state.lastFailedJob,
+        // Crash/refresh recovery: jobs that hadn't started yet survive a reload so nothing
+        // queued is silently lost. The currently-running job (if any) is folded back in as a
+        // queued job too, since the in-progress generation itself cannot survive a reload.
+        queue: [
+          ...(state.activeJob ? [{ ...state.activeJob, status: 'queued' as const }] : []),
+          ...state.queue,
+        ].slice(0, 200),
         // Strip heavy base64 data URLs to protect localStorage from hitting the 5MB browser quota
         activeImage: state.activeImage && !state.activeImage.startsWith('data:') ? state.activeImage : null,
         history: (state.history || [])
@@ -1391,6 +1513,14 @@ export const useAppStore = create<AppState>()(
           .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
           .slice(0, 100),
       }),
+      onRehydrateStorage: () => (state) => {
+        // Runs once, right after the persisted queue is loaded back in - captures how many
+        // jobs survived a crash/refresh so the UI can offer to resume them exactly once,
+        // without re-triggering every time the queue changes during normal use afterward.
+        if (state && state.queue && state.queue.length > 0) {
+          state.recoveredQueueSize = state.queue.length;
+        }
+      },
     }
   )
 );

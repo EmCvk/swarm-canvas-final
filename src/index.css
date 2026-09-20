@@ -1706,6 +1706,9 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   .sc-queue-chip {
     animation: sc-pill-in .14s cubic-bezier(.2,.8,.2,1) both;
   }
+  .sc-live-monitor {
+    animation: sc-bar-in .16s ease both;
+  }
 }
 
 /* Prefer compositor-friendly rendering for repeated, independently scrolling UI. */
