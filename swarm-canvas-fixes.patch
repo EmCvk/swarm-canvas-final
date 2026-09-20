@@ -1,0 +1,157 @@
+diff --git a/src/components/PromptAutosuggestTextarea.tsx b/src/components/PromptAutosuggestTextarea.tsx
+--- a/src/components/PromptAutosuggestTextarea.tsx
++++ b/src/components/PromptAutosuggestTextarea.tsx
+@@
+-    const weightedMatch = token.match(/^\((.+?):([0-9.]+)\)$/);
+-    if (weightedMatch) {
+-      cleanText = weightedMatch[1].trim();
+-      weight = parseFloat(weightedMatch[2]) || 1.0;
+-    } else {
++    const loraMatch = token.match(/^<(lora|lyco):(.+?):([0-9]+(?:\.[0-9]+)?)>$/i);
++    if (loraMatch) {
++      cleanText = token;
++      weight = parseFloat(loraMatch[3]) || 1.0;
++    } else {
++      const weightedMatch = token.match(/^\((.+?):([0-9.]+)\)$/);
++      if (weightedMatch) {
++        cleanText = weightedMatch[1].trim();
++        weight = parseFloat(weightedMatch[2]) || 1.0;
++      } else {
+@@
+-      }
+-    }
++        }
++      }
++    }
+@@
+ function serializePillsToPrompt(pills: ParsedPill[]): string {
+   return pills
+     .filter((p) => p.enabled !== false && p.text.trim())
+     .map((p) => {
+       const clean = p.text.trim();
++      const loraMatch = clean.match(/^<(lora|lyco):(.+?):([0-9]+(?:\.[0-9]+)?)>$/i);
++      if (loraMatch) {
++        return `<${loraMatch[1]}:${loraMatch[2]}:${Number(p.weight.toFixed(2))}>`;
++      }
+       if (p.weight === 1.0) return clean;
+       if (clean.startsWith('<') && clean.endsWith('>')) return clean;
+       return `(${clean}:${Number(p.weight.toFixed(2))})`;
+diff --git a/src/store/useAppStore.ts b/src/store/useAppStore.ts
+--- a/src/store/useAppStore.ts
++++ b/src/store/useAppStore.ts
+@@
+       reorderQueue: (startIndex: number, endIndex: number) =>
+         set((s) => {
+           const list = [...s.queue];
++          if (
++            startIndex < 0 ||
++            endIndex < 0 ||
++            startIndex >= list.length ||
++            endIndex >= list.length ||
++            startIndex === endIndex
++          ) {
++            return {};
++          }
+           const [moved] = list.splice(startIndex, 1);
++          if (!moved) return {};
+           list.splice(endIndex, 0, moved);
+           return { queue: list };
+         }),
+@@
+       cancelQueuedJob: (id) =>
+-        set((s) => ({ queue: s.queue.filter((q) => q.id !== id) })),
++        set((s) => {
++          const nextQueue = s.queue.filter((q) => q.id !== id);
++          if (nextQueue.length === s.queue.length) return {};
++          const removed = s.queue.find((q) => q.id === id);
++          const remainingBatchIds = new Set(nextQueue.map((q) => q.batchId).filter(Boolean));
++          const nextEmpty = (s.emptyBatches || []).filter((batchId) => batchId !== removed?.batchId || remainingBatchIds.has(batchId));
++          return { queue: nextQueue, emptyBatches: nextEmpty };
++        }),
+diff --git a/src/components/Workspace.tsx b/src/components/Workspace.tsx
+--- a/src/components/Workspace.tsx
++++ b/src/components/Workspace.tsx
+@@
+         <InfoPopover content="Adds the current prompt and parameters to the end of the queue. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="top" className="sc-popover-button-trigger">
+           <button
+             type="button"
+-            onClick={queueCurrentGeneration}
++            onClick={() => void enqueueAndProcess()}
+             className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
+             title="Add current prompt to background queue"
+           >
+@@
+-                                  draggable
++                                  draggable
+                                   onDragStart={(e) => {
+                                     e.stopPropagation();
+                                     e.dataTransfer.effectAllowed = 'move';
+@@
+                                   onMouseDown={(e) => e.stopPropagation()}
+                                   onPointerDown={(e) => e.stopPropagation()}
++                                  onClick={(e) => e.stopPropagation()}
+                                   className="sc-queue-drag-handle mt-0.5 shrink-0 p-0.5 rounded text-gray-500 hover:text-amber-300 cursor-grab active:cursor-grabbing"
+@@
+-                            onDragOver={(e) => {
++                            onDragOver={(e) => {
+                               e.preventDefault();
+                               e.stopPropagation();
+                               if (item.isRunning) return;
+                               e.dataTransfer.dropEffect = 'move';
+                             }}
+@@
+                             className={`sc-queue-timeline-item group flex items-start justify-between gap-2 p-1.5 rounded transition ${
+@@
+-                            }`}
++                            }`}
++                            data-queue-item="true"
+                           >
+@@
+-      <div
++      <div
+         ref={canvasContainerRef}
+@@
+-      onMouseDown={handleMouseDown}
++      onMouseDown={(e) => {
++        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
++        handleMouseDown(e);
++      }}
+@@
+-      onWheel={handleWheel}
++      onWheel={(e) => {
++        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
++        handleWheel(e);
++      }}
+diff --git a/src/index.css b/src/index.css
+--- a/src/index.css
++++ b/src/index.css
+@@
+ .sc-context-help-trigger .sc-context-info { cursor: help; }
++
++/* Action-button popovers should not visually sit over their own trigger. */
++.sc-popover-button-trigger .sc-info-popover-card {
++  pointer-events: none;
++}
++
++.sc-popover-button-trigger {
++  position: relative;
++  z-index: 1;
++}
+@@
+ .sc-prompt-collapse-frame.is-open { opacity: 1; }
++
++@media (prefers-reduced-motion: no-preference) {
++  .sc-prompt-collapse-frame.is-open > .sc-prompt-tray-content {
++    animation: sc-fade-up .18s cubic-bezier(.2,.8,.2,1) both;
++  }
++  .sc-queue-timeline-item {
++    transition: transform .14s cubic-bezier(.2,.8,.2,1), background-color .14s ease, opacity .14s ease, border-color .14s ease;
++  }
++  .sc-queue-timeline-item:hover {
++    transform: translateX(1px);
++  }
++  .sc-action-button:hover,
++  .sc-generate-button:hover {
++    transform: translateY(-1px);
++  }
++}

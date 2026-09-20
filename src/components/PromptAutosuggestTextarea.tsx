@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { danbooru } from '../api/danbooruService';
+import { parseWeightedToken, formatWeightedToken, isLoraToken, loraDisplayName } from '../utils/promptWeights';
 import {
   X,
   Plus,
@@ -53,26 +54,34 @@ function parsePromptStringToPills(promptStr: string): ParsedPill[] {
     let cleanText = token;
     let weight = 1.0;
 
-    const weightedMatch = token.match(/^\((.+?):([0-9.]+)\)$/);
-    if (weightedMatch) {
-      cleanText = weightedMatch[1].trim();
-      weight = parseFloat(weightedMatch[2]) || 1.0;
+    if (isLoraToken(token)) {
+      // LoRA/LyCORIS tags carry their weight inside the tag itself
+      // (`<lora:Name:1.2>`), not via an outer paren-weight wrapper.
+      const loraParsed = parseWeightedToken(token);
+      cleanText = loraParsed.base;
+      weight = loraParsed.weight;
     } else {
-      let parenCount = 0;
-      while (cleanText.startsWith('(') && cleanText.endsWith(')')) {
-        parenCount++;
-        cleanText = cleanText.slice(1, -1).trim();
-      }
-      if (parenCount > 0) {
-        weight = Number((1 + parenCount * 0.1).toFixed(2));
+      const weightedMatch = token.match(/^\((.+?):([0-9.]+)\)$/);
+      if (weightedMatch) {
+        cleanText = weightedMatch[1].trim();
+        weight = parseFloat(weightedMatch[2]) || 1.0;
       } else {
-        let bracketCount = 0;
-        while (cleanText.startsWith('[') && cleanText.endsWith(']')) {
-          bracketCount++;
+        let parenCount = 0;
+        while (cleanText.startsWith('(') && cleanText.endsWith(')')) {
+          parenCount++;
           cleanText = cleanText.slice(1, -1).trim();
         }
-        if (bracketCount > 0) {
-          weight = Number(Math.max(0.1, 1 - bracketCount * 0.1).toFixed(2));
+        if (parenCount > 0) {
+          weight = Number((1 + parenCount * 0.1).toFixed(2));
+        } else {
+          let bracketCount = 0;
+          while (cleanText.startsWith('[') && cleanText.endsWith(']')) {
+            bracketCount++;
+            cleanText = cleanText.slice(1, -1).trim();
+          }
+          if (bracketCount > 0) {
+            weight = Number(Math.max(0.1, 1 - bracketCount * 0.1).toFixed(2));
+          }
         }
       }
     }
@@ -97,8 +106,12 @@ function serializePillsToPrompt(pills: ParsedPill[]): string {
     .filter((p) => p.enabled !== false && p.text.trim())
     .map((p) => {
       const clean = p.text.trim();
+      if (p.category === 'lora' && isLoraToken(clean)) {
+        // Re-embed the (possibly wheel-adjusted) weight into the lora tag itself
+        // rather than wrapping the whole tag in an outer paren-weight.
+        return formatWeightedToken(parseWeightedToken(clean), p.weight);
+      }
       if (p.weight === 1.0) return clean;
-      if (clean.startsWith('<') && clean.endsWith('>')) return clean;
       return `(${clean}:${Number(p.weight.toFixed(2))})`;
     })
     .join(', ');
@@ -427,7 +440,9 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                   onDoubleClick={() => startEditPill(index)}
                   className="cursor-pointer max-w-48 truncate"
                 >
-                  {pill.text}
+                  {pill.category === 'lora' && isLoraToken(pill.text)
+                    ? loraDisplayName(parseWeightedToken(pill.text).loraName || pill.text)
+                    : pill.text}
                 </span>
 
                 {pill.weight !== 1.0 && (

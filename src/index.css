@@ -1617,6 +1617,16 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
 .sc-context-help-trigger .sc-info-popover-trigger { width: 17px; height: 17px; }
 .sc-context-help-trigger .sc-context-info { cursor: help; }
 
+/* Action-button popovers should not visually sit over their own trigger. */
+.sc-popover-button-trigger .sc-info-popover-card {
+  pointer-events: none;
+}
+
+.sc-popover-button-trigger {
+  position: relative;
+  z-index: 1;
+}
+
 /* Smooth movement for common floating surfaces. */
 @media (prefers-reduced-motion: no-preference) {
   .sc-workspace-shell .sc-settings-modal-backdrop,
@@ -1643,6 +1653,54 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
 }
 @keyframes sc-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes sc-panel-in { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes sc-pill-in { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
+@keyframes sc-bar-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Broader interactive-element polish: buttons, chips, and prompt/lora pills all get a
+   consistent hover lift + press feedback, and newly-mounted pills animate in. */
+@media (prefers-reduced-motion: no-preference) {
+  .sc-action-button,
+  .sc-generate-button {
+    transition: background .16s ease, color .16s ease, opacity .16s ease, transform .12s cubic-bezier(.2,.8,.2,1), box-shadow .16s ease;
+  }
+  .sc-action-button:hover,
+  .sc-generate-button:hover {
+    transform: translateY(-1px);
+  }
+  .sc-generate-button:hover {
+    box-shadow: 0 6px 20px rgba(0,0,0,.32);
+  }
+  .sc-filter-chip {
+    transition: background .16s ease, color .16s ease, transform .12s cubic-bezier(.2,.8,.2,1);
+  }
+  .sc-filter-chip:hover {
+    transform: translateY(-1px);
+  }
+
+  .sc-prompt-pill {
+    animation: sc-pill-in .14s cubic-bezier(.2,.8,.2,1) both;
+    transition: transform .12s cubic-bezier(.2,.8,.2,1), border-color .14s ease, color .14s ease, background-color .14s ease, box-shadow .14s ease;
+  }
+  .sc-prompt-pill:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px rgba(0,0,0,.28);
+  }
+  .sc-prompt-pill:active {
+    transform: translateY(0) scale(.97);
+  }
+
+  .sc-lora-pills-bar {
+    animation: sc-bar-in .16s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .sc-lora-pill {
+    animation: sc-pill-in .14s cubic-bezier(.2,.8,.2,1) both;
+    transition: transform .12s cubic-bezier(.2,.8,.2,1), opacity .14s ease, box-shadow .14s ease;
+  }
+  .sc-lora-pill:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(192,38,211,.18);
+  }
+}
 
 /* Prefer compositor-friendly rendering for repeated, independently scrolling UI. */
 .sc-workspace-shell .sc-scroll-region { contain: layout style; content-visibility: auto; contain-intrinsic-size: 420px; }

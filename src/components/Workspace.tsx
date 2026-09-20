@@ -71,6 +71,8 @@ import { StudioToolsPanel } from './StudioToolsPanel';
 
 import { swarmClient, emitDiagnostic } from '../api/swarmClient';
 
+import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken } from '../utils/promptWeights';
+
 import {
 
   Wand2, Plus, Clock, Gauge, Command as CommandIcon, ArrowDownUp,
@@ -91,7 +93,7 @@ import {
 
   Star, Info, Volume2, Play, Sparkles, Crop, Type, Move, GripVertical,
 
-  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark
+  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X
 
 } from 'lucide-react';
 
@@ -615,7 +617,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
     comparisonImage: s.comparisonImage, isComparing: s.isComparing, compareSplit: s.compareSplit,
     setIsComparing: s.setIsComparing, setComparisonImage: s.setComparisonImage, setCompareSplit: s.setCompareSplit,
     history: s.history, cancelGeneration: s.cancelGeneration, settings: s.settings, updateSettings: s.updateSettings,
-    enqueueAndProcess: s.enqueueAndProcess, queueCurrentGeneration: s.queueCurrentGeneration, startQueueProcessing: s.startQueueProcessing,
+    enqueueAndProcess: s.enqueueAndProcess, startQueueProcessing: s.startQueueProcessing,
     lastFailedJob: s.lastFailedJob, retryFailedJob: s.retryFailedJob, clearFailedJob: s.clearFailedJob,
     setActiveContextMenu: s.setActiveContextMenu, queue: s.queue, activeJob: s.activeJob, emptyBatches: s.emptyBatches,
     isQueuePaused: s.isQueuePaused, setIsQueuePaused: s.setIsQueuePaused,
@@ -627,7 +629,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   const {
     activeImage, livePreview, isGenerating, currentStep, maxSteps, progressPercent, metrics, setParams,
     comparisonImage, isComparing, compareSplit, setIsComparing, setComparisonImage, setCompareSplit, history,
-    cancelGeneration, settings, updateSettings, enqueueAndProcess, queueCurrentGeneration, startQueueProcessing,
+    cancelGeneration, settings, updateSettings, enqueueAndProcess, startQueueProcessing,
     lastFailedJob, retryFailedJob, clearFailedJob, setActiveContextMenu
   } = store;
 
@@ -1111,9 +1113,15 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
       className="sc-themed-viewport h-full w-full relative flex flex-col items-center justify-center overflow-hidden select-none"
 
-      onWheel={handleWheel}
+      onWheel={(e) => {
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
+        handleWheel(e);
+      }}
 
-      onMouseDown={handleMouseDown}
+      onMouseDown={(e) => {
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
+        handleMouseDown(e);
+      }}
 
       onMouseMove={handleMouseMove}
 
@@ -1569,7 +1577,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
       {/* Floating Studio Execution Actions */}
 
-      <div className="absolute bottom-5 right-5 flex items-center gap-2 p-1.5 bg-[#090b10]/90 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-md z-30 select-none">
+      <div className="absolute bottom-5 right-5 flex items-center gap-2 p-1.5 bg-[#090b10]/90 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-md z-40 select-none">
 
         {isGenerating ? (
 
@@ -1609,17 +1617,16 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <InfoPopover content="Adds the current prompt and parameters to the end of the queue. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="top" className="sc-popover-button-trigger">
-          <button
+        <button
             type="button"
-            onClick={queueCurrentGeneration}
+            onClick={() => void enqueueAndProcess()}
             className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
-            title="Add current prompt to background queue"
+            title="Add current prompt to background queue and start processing"
           >
             <Plus className="w-3.5 h-3.5 text-blue-300" />
             <span>Queue</span>
           </button>
-        </InfoPopover>
+        
 
       </div>
 
@@ -1633,7 +1640,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
           className={`absolute top-12 right-3 ${
 
-            isQueueExpanded ? 'w-[560px] max-h-[620px]' : 'w-88 max-h-[460px]'
+            isQueueExpanded ? 'w-[560px] max-h-[min(620px,calc(100%_-_92px))]' : 'w-88 max-h-[min(460px,calc(100%_-_92px))]'
 
           } sc-queue-hub bg-[#12141c]/95 border border-[#2d3346] rounded-xl shadow-2xl backdrop-blur-md flex flex-col z-30 overflow-hidden text-xs transition-all duration-150`}
 
@@ -2074,6 +2081,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                                   }}
                                   onMouseDown={(e) => e.stopPropagation()}
                                   onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => e.stopPropagation()}
                                   className="sc-queue-drag-handle mt-0.5 shrink-0 p-0.5 rounded text-gray-500 hover:text-amber-300 cursor-grab active:cursor-grabbing"
                                   title="Drag to reorder this job"
                                   aria-label="Drag to reorder queue job"
@@ -2956,6 +2964,117 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+  /** Adjusts the weight of a single prompt token in-place, preserving lora tag syntax and mute-comments. */
+  const adjustTokenWeightAt = (target: 'positive' | 'negative', index: number, delta: number) => {
+    const tokens = getPromptTokens(target);
+    const tok = tokens[index];
+    if (tok === undefined || tok === '\n' || tok === 'BREAK') return;
+    const muted = tok.startsWith('/*') && tok.endsWith('*/');
+    const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+    const parsed = parseWeightedToken(clean);
+    const newW = Math.max(0.1, Math.min(2.5, Number((parsed.weight + delta).toFixed(2))));
+    const mod = formatWeightedToken(parsed, newW);
+    const updated = [...tokens];
+    updated[index] = muted ? `/* ${mod} */` : mod;
+    setPromptTokens(target, updated);
+  };
+
+  /** Toggles the mute/bypass comment-wrapper on a single prompt token. */
+  const toggleTokenMutedAt = (target: 'positive' | 'negative', index: number) => {
+    const tokens = getPromptTokens(target);
+    const tok = tokens[index];
+    if (tok === undefined || tok === '\n' || tok === 'BREAK') return;
+    const isMutedTok = tok.startsWith('/*') && tok.endsWith('*/');
+    const cleanTok = isMutedTok ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+    const updated = [...tokens];
+    updated[index] = isMutedTok ? cleanTok : `/* ${cleanTok} */`;
+    setPromptTokens(target, updated);
+  };
+
+  const removeTokenAt = (target: 'positive' | 'negative', index: number) => {
+    const tokens = getPromptTokens(target);
+    const updated = tokens.filter((_, i) => i !== index);
+    setPromptTokens(target, updated);
+  };
+
+  /** Active lora/lyco references for a prompt target, in prompt order, with their live index. */
+  const getActiveLoraTokens = (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    return tokens
+      .map((tok, index) => ({ tok, index }))
+      .filter(({ tok }) => {
+        if (tok === '\n' || tok === 'BREAK') return false;
+        const muted = tok.startsWith('/*') && tok.endsWith('*/');
+        const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+        return isLoraToken(clean);
+      })
+      .map(({ tok, index }) => {
+        const muted = tok.startsWith('/*') && tok.endsWith('*/');
+        const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+        return { index, muted, parsed: parseWeightedToken(clean) };
+      });
+  };
+
+  /** Compact strip of active LoRA/LyCORIS pills shown above a prompt box, so weights and
+   *  enabled state can be managed without hunting through a long tag list. Scroll-to-adjust
+   *  mirrors the inline pill behavior and always preserves `<lora:name:weight>` syntax. */
+  const renderLoraPillsBar = (target: 'positive' | 'negative') => {
+    const loras = getActiveLoraTokens(target);
+    if (loras.length === 0) return null;
+
+    return (
+      <div className="sc-lora-pills-bar flex items-center gap-1.5 px-2 py-1.5 border-b border-[#242838] overflow-x-auto shrink-0">
+        <Sparkle className="w-3 h-3 text-fuchsia-400 shrink-0" />
+        {loras.map(({ index, muted, parsed }) => (
+          <div
+            key={`lora-pill-${target}-${index}-${parsed.loraName}`}
+            onWheel={(e) => {
+              if (!scrollWeightEnabled) return;
+              e.preventDefault();
+              e.stopPropagation();
+              const step = settings.tagClickWeightStep ?? 0.2;
+              adjustTokenWeightAt(target, index, e.deltaY < 0 ? step : -step);
+            }}
+            className={`sc-lora-pill group flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full border text-[10px] font-mono shrink-0 transition ${
+              muted
+                ? 'opacity-45 line-through bg-black/40 border-zinc-700 text-zinc-500'
+                : 'bg-fuchsia-950/40 border-fuchsia-500/40 text-fuchsia-200'
+            }`}
+            title={`${parsed.loraName}\nScroll to adjust weight`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 shrink-0" />
+            <span className="max-w-32 truncate">{loraDisplayName(parsed.loraName || parsed.base)}</span>
+            <span className="px-1 py-0.2 rounded bg-black/40 text-fuchsia-300">{parsed.weight.toFixed(2)}×</span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleTokenMutedAt(target, index);
+              }}
+              className="p-0.5 rounded opacity-60 hover:opacity-100 hover:text-white transition-opacity"
+              title={muted ? 'Enable LoRA' : 'Mute LoRA'}
+            >
+              {muted ? <EyeOff className="w-2.5 h-2.5" /> : <Eye className="w-2.5 h-2.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                removeTokenAt(target, index);
+              }}
+              className="p-0.5 rounded opacity-60 hover:opacity-100 hover:text-rose-300 transition-opacity"
+              title="Remove LoRA"
+            >
+              <X className="w-2.5 h-2.5" />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+
+
   const appendTag = (tag: string, target = activeTarget, weight = 1.0) => {
 
     const clean = tag === '\n' ? '\n' : (settings.useUnderscores ? tag.toLowerCase().replace(/\s+/g, '_') : tag.replace(/_/g, ' '));
@@ -3246,9 +3365,15 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
       if (token === '\n' || token === 'BREAK') return token;
 
-      const clean = token.replace(/[\(\):0-9.]/g, '').trim();
+      const muted = token.startsWith('/*') && token.endsWith('*/');
 
-      return `(${clean}:${weightMult.toFixed(2)})`;
+      const clean = muted ? token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : token;
+
+      const parsed = parseWeightedToken(clean);
+
+      const mod = formatWeightedToken(parsed, weightMult);
+
+      return muted ? `/* ${mod} */` : mod;
 
     });
 
@@ -4236,11 +4361,17 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 const cleanToken = isMuted ? token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : token;
 
-                const weightMatch = cleanToken.match(/^\((.*):([0-9.]+)\)$/);
+                const parsedPillToken = parseWeightedToken(cleanToken);
 
-                const displayLabel = weightMatch ? weightMatch[1] : cleanToken;
+                const displayLabel = parsedPillToken.isLora
+                  ? loraDisplayName(parsedPillToken.loraName || parsedPillToken.base)
+                  : parsedPillToken.base;
 
-                const weightVal = weightMatch ? parseFloat(weightMatch[2]) : 1.0;
+                const weightVal = parsedPillToken.weight;
+
+                const showWeightBadge = parsedPillToken.weight !== 1.0;
+
+                const isLoraPill = parsedPillToken.isLora;
 
 
 
@@ -4374,15 +4505,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
 
-                          const match = clean.match(/^\((.*):([0-9.]+)\)$/);
+                          const parsed = parseWeightedToken(clean);
 
-                          const base = match ? match[1] : clean;
+                          const newW = Math.max(0.1, Math.min(2.5, Number((parsed.weight + delta).toFixed(2))));
 
-                          const curW = match ? parseFloat(match[2]) : 1.0;
-
-                          const newW = Math.max(0.1, Math.min(2.5, Number((curW + delta).toFixed(2))));
-
-                          const mod = newW === 1.0 ? base : `(${base}:${newW.toFixed(2)})`;
+                          const mod = formatWeightedToken(parsed, newW);
 
                           updated[i] = muted ? `/* ${mod} */` : mod;
 
@@ -4482,7 +4609,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       onContextMenu={(e) => handlePromptboxPillContextMenu(target, idx, token, e)}
 
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
+                      className={`sc-prompt-pill px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
 
                         isMuted
 
@@ -4496,6 +4623,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           ? 'ring-2 ring-cyan-400 bg-cyan-950/50 border-cyan-400 text-cyan-200 shadow-[0_0_10px_rgba(6,182,212,0.4)]'
 
+                          : isLoraPill
+
+                          ? 'bg-fuchsia-950/40 border-fuchsia-500/40 text-fuchsia-200 hover:border-fuchsia-400 hover:text-white'
+
                           : isPositive
 
                           ? 'bg-[#121624] border-indigo-500/40 text-indigo-200 hover:border-indigo-400 hover:text-white'
@@ -4504,7 +4635,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       }`}
 
-                      title="Left click: Edit • Drag: Multiselect • Double click: Disable • Scroll: Weight"
+                      title={isLoraPill ? 'Left click: Edit • Scroll: Adjust LoRA weight • Double click: Disable' : 'Left click: Edit • Drag: Multiselect • Double click: Disable • Scroll: Weight'}
 
                     >
 
@@ -4544,7 +4675,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           <span>{displayLabel}</span>
 
-                          {weightMatch && (
+                          {showWeightBadge && (
 
                             <span
 
@@ -5226,6 +5357,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
             </div>
 
+            {renderLoraPillsBar('positive')}
+
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
 
               {renderPromptBoxBody('positive')}
@@ -5369,6 +5502,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
               <span className="text-[10px] text-gray-500 font-mono">{negativePrompt.length} chars</span>
 
             </div>
+
+            {renderLoraPillsBar('negative')}
 
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
 

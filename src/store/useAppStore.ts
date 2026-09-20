@@ -397,7 +397,17 @@ export const useAppStore = create<AppState>()(
       reorderQueue: (startIndex: number, endIndex: number) =>
         set((s) => {
           const list = [...s.queue];
+          if (
+            startIndex < 0 ||
+            endIndex < 0 ||
+            startIndex >= list.length ||
+            endIndex >= list.length ||
+            startIndex === endIndex
+          ) {
+            return {};
+          }
           const [moved] = list.splice(startIndex, 1);
+          if (!moved) return {};
           list.splice(endIndex, 0, moved);
           return { queue: list };
         }),
@@ -1215,7 +1225,14 @@ export const useAppStore = create<AppState>()(
       },
 
       cancelQueuedJob: (id) =>
-        set((s) => ({ queue: s.queue.filter((q) => q.id !== id) })),
+        set((s) => {
+          const nextQueue = s.queue.filter((q) => q.id !== id);
+          if (nextQueue.length === s.queue.length) return {};
+          const removed = s.queue.find((q) => q.id === id);
+          const remainingBatchIds = new Set(nextQueue.map((q) => q.batchId).filter(Boolean));
+          const nextEmpty = (s.emptyBatches || []).filter((batchId) => batchId !== removed?.batchId || remainingBatchIds.has(batchId));
+          return { queue: nextQueue, emptyBatches: nextEmpty };
+        }),
 
       clearQueue: () => set({ queue: [], currentQueueBatchId: null }),
 
