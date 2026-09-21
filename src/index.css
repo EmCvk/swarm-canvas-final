@@ -1709,6 +1709,9 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   .sc-live-monitor {
     animation: sc-bar-in .16s ease both;
   }
+  .sc-search-suggest {
+    animation: sc-panel-in .14s cubic-bezier(.2,.8,.2,1) both;
+  }
 }
 
 /* Prefer compositor-friendly rendering for repeated, independently scrolling UI. */

@@ -83,3 +83,22 @@ export function matchesGenerationQuery(item: SearchableGenerationItem, query: st
     }
   });
 }
+
+/** If the query's last (possibly in-progress) word is a `model:`/`lora:`/`tag:` filter,
+ *  returns that field and the partial value typed so far, plus the query with that last word
+ *  removed (so a chosen suggestion can be appended back cleanly). Returns null for any other
+ *  trailing word (including `before:`/`after:`/`seed:`, which don't have a suggestion list). */
+export function parseActiveFieldTerm(query: string): { field: 'model' | 'lora' | 'tag'; value: string; prefix: string } | null {
+  const match = query.match(/(^|\s)(model|lora|tag):([^\s]*)$/i);
+  if (!match) return null;
+  const field = match[2].toLowerCase() as 'model' | 'lora' | 'tag';
+  const value = match[3];
+  const prefix = query.slice(0, query.length - match[0].length + match[1].length);
+  return { field, value, prefix };
+}
+
+/** Rebuilds the query with the active trailing field term replaced by a chosen suggestion. */
+export function applyFieldSuggestion(prefix: string, field: string, chosenValue: string): string {
+  const cleanPrefix = prefix ? `${prefix.trimEnd()} ` : '';
+  return `${cleanPrefix}${field}:${chosenValue} `;
+}

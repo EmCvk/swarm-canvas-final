@@ -73,7 +73,7 @@ import { swarmClient, emitDiagnostic } from '../api/swarmClient';
 
 import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken, extractPromptLoras } from '../utils/promptWeights';
 
-import { matchesGenerationQuery } from '../utils/historySearch';
+import { matchesGenerationQuery, parseActiveFieldTerm, applyFieldSuggestion } from '../utils/historySearch';
 
 import { emitToast } from '../utils/toast';
 
@@ -1781,7 +1781,8 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <button
+        <InfoPopover content="Adds the current prompt and parameters to the end of the queue and starts processing if nothing is running. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="left" className="sc-popover-button-trigger">
+          <button
             type="button"
             onClick={() => void enqueueAndProcess()}
             className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
@@ -1790,7 +1791,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
             <Plus className="w-3.5 h-3.5 text-blue-300" />
             <span>Queue</span>
           </button>
-        
+        </InfoPopover>
 
       </div>
 
@@ -2909,7 +2910,12 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [editingText, setEditingText] = useState('');
 
-  const [draggedPill, setDraggedPill] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
+  // Tracks the pill currently being drag-reordered. This must be a ref, not state: `dragover`
+  // fires many times per second while dragging, faster than React can guarantee a re-render
+  // between events. Reading a stale `tokens`/`draggedPill` snapshot across those rapid-fire
+  // events was corrupting the prompt (splicing against an array that no longer matched
+  // reality) - a ref is always current, with no render-cycle lag.
+  const draggedPillRef = useRef<{ target: 'positive' | 'negative'; index: number } | null>(null);
 
   const [newTagInput, setNewTagInput] = useState<{ positive: string; negative: string }>({ positive: '', negative: '' });
 
@@ -3233,6 +3239,56 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const getPromptTokens = (target: 'positive' | 'negative'): string[] => {
 
     const text = target === 'positive' ? prompt : negativePrompt;
+
+    if (!text) return [];
+
+
+
+    const result: string[] = [];
+
+    const lines = text.split('\n');
+
+
+
+    lines.forEach((line, lineIdx) => {
+
+      const lineTokens = line
+
+        .split(',')
+
+        .map((t) => t.trim())
+
+        .filter(Boolean);
+
+
+
+      result.push(...lineTokens);
+
+      if (lineIdx < lines.length - 1) {
+
+        result.push('\n');
+
+      }
+
+    });
+
+
+
+    return result;
+
+  };
+
+
+
+  /** Same tokenization as getPromptTokens, but reads the prompt directly from the live store
+   *  instead of this component's render-time closure. Needed anywhere state can change faster
+   *  than React re-renders (rapid-fire events like `dragover`), where the closed-over `prompt`/
+   *  `negativePrompt` values would otherwise be one or more events behind reality. */
+  const getFreshPromptTokens = (target: 'positive' | 'negative'): string[] => {
+
+    const state = useAppStore.getState();
+
+    const text = target === 'positive' ? state.prompt : state.negativePrompt;
 
     if (!text) return [];
 
@@ -4472,6 +4528,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
             autoFocus
 
+            onDrop={(e) => e.preventDefault()}
+
             value={insertTagInput}
 
             onChange={(e) => setInsertTagInput(e.target.value)}
@@ -4842,27 +4900,52 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       draggable={!isCurrentlyEditing && selectedTokens[target].size <= 1}
 
-                      onDragStart={() => setDraggedPill({ target, index: idx })}
+                      onDragStart={(e) => {
+
+                        draggedPillRef.current = { target, index: idx };
+
+                        // Take full control of the drag payload so no default browser
+                        // behavior (e.g. dropping raw text into an input elsewhere) can run
+                        // alongside our own reorder logic.
+                        e.dataTransfer.effectAllowed = 'move';
+
+                        e.dataTransfer.setData('text/plain', '');
+
+                      }}
 
                       onDragOver={(e) => {
 
                         e.preventDefault();
 
-                        if (!draggedPill || draggedPill.target !== target || draggedPill.index === idx) return;
+                        const dragged = draggedPillRef.current;
 
-                        const updated = [...tokens];
+                        if (!dragged || dragged.target !== target || dragged.index === idx) return;
 
-                        const [moved] = updated.splice(draggedPill.index, 1);
+                        const fresh = getFreshPromptTokens(target);
+
+                        if (dragged.index >= fresh.length) { draggedPillRef.current = { target, index: idx }; return; }
+
+                        const updated = [...fresh];
+
+                        const [moved] = updated.splice(dragged.index, 1);
 
                         updated.splice(idx, 0, moved);
 
-                        setPromptTokens(target, updated);
+                        draggedPillRef.current = { target, index: idx };
 
-                        setDraggedPill({ target, index: idx });
+                        setPromptTokens(target, updated);
 
                       }}
 
-                      onDragEnd={() => setDraggedPill(null)}
+                      onDrop={(e) => {
+
+                        e.preventDefault();
+
+                        e.stopPropagation();
+
+                      }}
+
+                      onDragEnd={() => { draggedPillRef.current = null; }}
 
                       onMouseDown={(e) => {
 
@@ -5104,6 +5187,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           autoFocus
 
+                          onDrop={(e) => e.preventDefault()}
+
                           style={{ width: `${Math.max(editingText.length + 2, 4)}ch` }}
 
                           value={editingText}
@@ -5185,6 +5270,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   type="text"
 
                   placeholder="+ Add tag... (Shift+Enter for break)"
+
+                  onDrop={(e) => e.preventDefault()}
 
                   value={newTagInput[target]}
 
@@ -8788,12 +8875,116 @@ const MetadataModal: React.FC<{ item: HistoryItem | null; onClose: () => void }>
 
    ========================================================================= */
 
+/** Powers the model:/lora:/tag: suggestion dropdown for the History and Gallery search boxes.
+ *  Model/LoRA suggestions come from the already-loaded asset lists; tag suggestions query the
+ *  local Danbooru tag worker (debounced implicitly by only firing on the trailing word). */
+function useFieldSearchSuggestions(query: string, modelsList: ModelItem[], lorasList: ModelItem[]) {
+
+  const [suggestions, setSuggestions] = useState<{ label: string; value: string }[]>([]);
+
+  const [activeField, setActiveField] = useState<{ field: 'model' | 'lora' | 'tag'; prefix: string } | null>(null);
+
+  const requestIdRef = useRef(0);
+
+
+
+  useEffect(() => {
+
+    const active = parseActiveFieldTerm(query);
+
+    if (!active) {
+
+      setSuggestions([]);
+
+      setActiveField(null);
+
+      return;
+
+    }
+
+    setActiveField({ field: active.field, prefix: active.prefix });
+
+
+
+    if (active.field === 'model' || active.field === 'lora') {
+
+      const list = active.field === 'model' ? modelsList : lorasList;
+
+      const q = active.value.toLowerCase();
+
+      const matches = (list || [])
+
+        .filter((m) => m.name.toLowerCase().includes(q))
+
+        .slice(0, 8)
+
+        .map((m) => ({ label: m.name.split('/').pop()?.replace(/\.[^/.]+$/, '') || m.name, value: m.name }));
+
+      setSuggestions(matches);
+
+      return;
+
+    }
+
+
+
+    // tag:
+    if (!active.value) { setSuggestions([]); return; }
+
+    const myRequestId = ++requestIdRef.current;
+
+    danbooru.searchAutocomplete(active.value, 8)
+
+      .then((items) => {
+
+        if (requestIdRef.current !== myRequestId) return; // a newer keystroke superseded this request
+
+        setSuggestions(items.map((it) => ({ label: it.name, value: it.name })));
+
+      })
+
+      .catch(() => {});
+
+  }, [query, modelsList, lorasList]);
+
+
+
+  const applySuggestion = (setQuery: (q: string) => void, value: string) => {
+
+    if (!activeField) return;
+
+    setQuery(applyFieldSuggestion(activeField.prefix, activeField.field, value));
+
+    setSuggestions([]);
+
+    setActiveField(null);
+
+  };
+
+
+
+  const dismiss = () => {
+
+    setSuggestions([]);
+
+    setActiveField(null);
+
+  };
+
+
+
+  return { suggestions, activeField, applySuggestion, dismiss };
+
+}
+
+
+
 const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const {
     history, sessionStartTime, setParams, useGenerationParams, setComparisonImage, settings, updateSettings,
     deleteHistoryItem, setActiveContextMenu, toggleFavorite, rerollFromHistory, branchFromHistory,
-    getLineageAncestors, getLineageChildren,
+    getLineageAncestors, getLineageChildren, setModel, modelsList, lorasList,
   } = useAppStore(useShallow((s) => ({
 
     history: s.history, sessionStartTime: s.sessionStartTime, setParams: s.setParams, useGenerationParams: s.useGenerationParams,
@@ -8802,7 +8993,8 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
     setActiveContextMenu: s.setActiveContextMenu, toggleFavorite: s.toggleFavorite,
     rerollFromHistory: s.rerollFromHistory, branchFromHistory: s.branchFromHistory,
-    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren,
+    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren, setModel: s.setModel,
+    modelsList: s.modelsList, lorasList: s.lorasList,
 
   })));
 
@@ -8845,6 +9037,8 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
   const [historySearchQuery, setHistorySearchQuery] = useState('');
+
+  const { suggestions: historySuggestions, activeField: historyActiveField, applySuggestion: applyHistorySuggestion, dismiss: dismissHistorySuggestions } = useFieldSearchSuggestions(historySearchQuery, modelsList, lorasList);
 
 
 
@@ -8951,6 +9145,11 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
         action: () => useGenerationParams(item)
 
       },
+      {
+        label: 'Use model',
+        icon: <Box className="w-3.5 h-3.5 text-sky-400" />,
+        action: () => { setModel(item.params.model); emitToast(`Model set to ${item.params.model.split('/').pop()?.replace(/\.[^/.]+$/, '')}`, 'success'); }
+      },
 
       {
 
@@ -9056,6 +9255,8 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
             onChange={(e) => setHistorySearchQuery(e.target.value)}
 
+            onKeyDown={(e) => { if (e.key === 'Escape' && historyActiveField) { e.stopPropagation(); dismissHistorySuggestions(); } }}
+
             placeholder="Search, or model:x lora:y seed:z tag:w before:2026-01-01"
 
             title="Supports model:, lora:, seed:, tag:, before:, after: filters, combined with plain text"
@@ -9081,6 +9282,36 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
               <X className="w-3 h-3" />
 
             </button>
+
+          )}
+
+          {historyActiveField && historySuggestions.length > 0 && (
+
+            <div className="sc-search-suggest absolute top-full left-0 mt-1 w-full max-h-48 overflow-y-auto rounded-lg bg-[#181a1c] border border-[#2d3346] shadow-2xl z-50">
+
+              {historySuggestions.map((s) => (
+
+                <button
+
+                  key={s.value}
+
+                  type="button"
+
+                  onMouseDown={(e) => { e.preventDefault(); applyHistorySuggestion(setHistorySearchQuery, s.value); }}
+
+                  className="w-full text-left px-2.5 py-1.5 text-[10px] font-mono text-gray-300 hover:bg-indigo-950/50 hover:text-white truncate"
+
+                  title={s.value}
+
+                >
+
+                  {s.label}
+
+                </button>
+
+              ))}
+
+            </div>
 
           )}
 
@@ -9542,7 +9773,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
     deleteHistoryItem, setActiveContextMenu, syncServerGallery, settings, updateSettings,
 
     galleryCurrentPage, setGalleryCurrentPage, toggleFavorite,
-    rerollFromHistory, branchFromHistory, getLineageAncestors, getLineageChildren,
+    rerollFromHistory, branchFromHistory, getLineageAncestors, getLineageChildren, setModel,
+    modelsList, lorasList,
 
   } = useAppStore(useShallow((s) => ({
 
@@ -9554,7 +9786,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
     setGalleryCurrentPage: s.setGalleryCurrentPage, toggleFavorite: s.toggleFavorite,
     rerollFromHistory: s.rerollFromHistory, branchFromHistory: s.branchFromHistory,
-    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren,
+    getLineageAncestors: s.getLineageAncestors, getLineageChildren: s.getLineageChildren, setModel: s.setModel,
+    modelsList: s.modelsList, lorasList: s.lorasList,
 
   })));
 
@@ -9599,6 +9832,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
   const [gallerySearchQuery, setGallerySearchQuery] = useState('');
+
+  const { suggestions: gallerySuggestions, activeField: galleryActiveField, applySuggestion: applyGallerySuggestion, dismiss: dismissGallerySuggestions } = useFieldSearchSuggestions(gallerySearchQuery, modelsList, lorasList);
 
   const [isSyncingServer, setIsSyncingServer] = useState(false);
 
@@ -9660,6 +9895,11 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
         action: () => useGenerationParams(item)
 
+      },
+      {
+        label: 'Use model',
+        icon: <Box className="w-3.5 h-3.5 text-sky-400" />,
+        action: () => { setModel(item.params.model); emitToast(`Model set to ${item.params.model.split('/').pop()?.replace(/\.[^/.]+$/, '')}`, 'success'); }
       },
 
       {
@@ -9774,6 +10014,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
             onChange={(e) => setGallerySearchQuery(e.target.value)}
 
+            onKeyDown={(e) => { if (e.key === 'Escape' && galleryActiveField) { e.stopPropagation(); dismissGallerySuggestions(); } }}
+
             placeholder="model:x lora:y seed:z tag:w..."
 
             title="Supports model:, lora:, seed:, tag:, before:, after: filters, combined with plain text"
@@ -9799,6 +10041,36 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
               <X className="w-3 h-3" />
 
             </button>
+
+          )}
+
+          {galleryActiveField && gallerySuggestions.length > 0 && (
+
+            <div className="sc-search-suggest absolute top-full left-0 mt-1 w-56 max-h-48 overflow-y-auto rounded-lg bg-[#181a1c] border border-[#2d3346] shadow-2xl z-50">
+
+              {gallerySuggestions.map((s) => (
+
+                <button
+
+                  key={s.value}
+
+                  type="button"
+
+                  onMouseDown={(e) => { e.preventDefault(); applyGallerySuggestion(setGallerySearchQuery, s.value); }}
+
+                  className="w-full text-left px-2.5 py-1.5 text-[10px] font-mono text-gray-300 hover:bg-indigo-950/50 hover:text-white truncate"
+
+                  title={s.value}
+
+                >
+
+                  {s.label}
+
+                </button>
+
+              ))}
+
+            </div>
 
           )}
 
