@@ -404,6 +404,24 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
+    if (type === 'GET_DETAILS') {
+      const tags = Array.isArray(payload.tags) ? payload.tags : [];
+      const out = tags.map((tag: unknown) => {
+        const clean = String(tag || '').trim();
+        if (!clean) return null;
+        const r = lookup.get(cleanKey(clean));
+        if (!r) return { tag: clean, nativeCategory: 'General', nativeCategoryCode: '0', postCount: null, modeParent: 'General', modeSub: 'All Tags' };
+        const m = modeMeta(r);
+        return {
+          tag: r.tag, nativeCategory: r.nativeCategory, nativeCategoryCode: r.nativeCategoryCode,
+          wikiCategory: r.wikiCategory, uiCategory: r.uiCategory, uiSubCategory: r.uiSubCategory,
+          postCount: r.postCount, modeParent: m.parent, modeSub: m.sub,
+        };
+      }).filter(Boolean);
+      self.postMessage({ id, success: true, data: out });
+      return;
+    }
+
     if (type === 'GET_COUNT') {
       self.postMessage({ id, success: true, data: lookup.get(cleanKey(payload.tag))?.postCount ?? null });
       return;

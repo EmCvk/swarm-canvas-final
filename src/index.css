@@ -1258,6 +1258,55 @@ textarea:focus-visible {
 .sc-settings-reset:hover { color: var(--sc-text); background: var(--sc-surface-3); }
 .sc-settings-range { accent-color: var(--sc-gold-strong); }
 
+
+/* Larger, tabbed settings UI. Individual setting cards intentionally expose the most useful
+   existing application controls without forcing users through a long single-column form. */
+.sc-settings-modal { color: var(--sc-text); }
+.sc-setting-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 13px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sc-surface-2) 92%, transparent);
+  border: 1px solid var(--sc-theme-border);
+}
+.sc-toggle-card {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.sc-setting-label {
+  color: var(--sc-text);
+  font-weight: 650;
+  font-size: calc(12px * var(--sc-font-scale, 1));
+  line-height: 1.35;
+}
+.sc-setting-help {
+  display: block;
+  margin-top: 3px;
+  color: var(--sc-text-muted);
+  font-size: calc(10px * var(--sc-font-scale, 1));
+  line-height: 1.45;
+}
+.sc-setting-control {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--sc-border);
+  background: var(--sc-surface-0);
+  color: var(--sc-text);
+  outline: none;
+  font-size: calc(12px * var(--sc-font-scale, 1));
+}
+.sc-setting-control:focus {
+  border-color: color-mix(in srgb, var(--sc-gold) 55%, var(--sc-border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sc-gold) 13%, transparent);
+}
+.sc-settings-modal aside button { min-height: 42px; }
+
 /* Theme variables. Obsidian is the default; alternate themes intentionally change the visual language. */
 :root[data-ui-theme="obsidian"] {
   color-scheme: dark;
@@ -1625,6 +1674,7 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
 .sc-popover-button-trigger {
   position: relative;
   z-index: 1;
+  isolation: isolate;
 }
 
 /* Smooth movement for common floating surfaces. */

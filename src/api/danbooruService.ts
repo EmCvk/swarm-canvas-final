@@ -23,6 +23,123 @@ export interface AutocompleteItem { name: string; category?: string; count?: num
 interface Stats { parentCategories: string[]; parentCounts: Record<string, number>; subCounts: Record<string, Record<string, number>>; totalTags: number }
 interface Pending { resolve: (value:any)=>void; reject: (reason:any)=>void }
 
+export type RemoteTagCategory = 'general' | 'artist' | 'copyright' | 'character' | 'meta' | 'unknown';
+
+export interface RemoteTag {
+  id: number;
+  name: string;
+  category: number;
+  categoryName: RemoteTagCategory;
+  postCount: number;
+  hasArtist: boolean;
+  isDeprecated?: boolean;
+}
+
+export type RemotePostFeed = 'newest' | 'hot' | 'popular-day' | 'popular-week' | 'popular-month' | 'popular-year';
+
+export interface RemotePostQueryOptions {
+  /** Anchor date used by the historical popular feeds (YYYY-MM-DD). */
+  date?: string;
+  /** Additional positive post-search tags. */
+  includeTags?: string[];
+  /** Additional negative post-search tags. */
+  excludeTags?: string[];
+}
+
+export interface RemotePost {
+  id: number;
+  createdAt?: string;
+  score?: number;
+  favCount?: number;
+  rating?: string;
+  imageWidth?: number;
+  imageHeight?: number;
+  fileUrl?: string;
+  largeFileUrl?: string;
+  previewFileUrl?: string;
+  source?: string;
+  tagString?: string;
+  md5?: string;
+  tagStringArtist?: string;
+  tagStringCharacter?: string;
+  tagStringCopyright?: string;
+  tagStringGeneral?: string;
+  tagStringMeta?: string;
+  uploader?: string;
+  parentId?: number | null;
+}
+
+export interface RemoteWikiPage {
+  title: string;
+  body?: string;
+  otherNames?: string[];
+}
+
+const DANBOORU_ORIGIN = 'https://danbooru.donmai.us';
+
+function danbooruCategoryName(category: number): RemoteTagCategory {
+  switch (category) {
+    case 1: return 'artist';
+    case 3: return 'copyright';
+    case 4: return 'character';
+    case 5: return 'meta';
+    case 0: return 'general';
+    default: return 'unknown';
+  }
+}
+
+function encodeTagQuery(tag: string): string {
+  return tag.trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+async function fetchDanbooruJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${DANBOORU_ORIGIN}${path}`, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+  if (!response.ok) throw new Error(`Danbooru HTTP ${response.status}`);
+  return response.json() as Promise<T>;
+}
+
+function mapRemoteTag(raw: any): RemoteTag {
+  const category = Number(raw?.category ?? -1);
+  return {
+    id: Number(raw?.id ?? 0),
+    name: String(raw?.name ?? ''),
+    category,
+    categoryName: danbooruCategoryName(category),
+    postCount: Number(raw?.post_count ?? 0),
+    hasArtist: Boolean(raw?.has_artist),
+    isDeprecated: Boolean(raw?.is_deprecated),
+  };
+}
+
+function mapRemotePost(raw: any): RemotePost {
+  return {
+    id: Number(raw?.id ?? 0),
+    createdAt: typeof raw?.created_at === 'string' ? raw.created_at : undefined,
+    score: Number.isFinite(Number(raw?.score)) ? Number(raw.score) : undefined,
+    favCount: Number.isFinite(Number(raw?.fav_count)) ? Number(raw.fav_count) : undefined,
+    rating: typeof raw?.rating === 'string' ? raw.rating : undefined,
+    imageWidth: Number.isFinite(Number(raw?.image_width)) ? Number(raw.image_width) : undefined,
+    imageHeight: Number.isFinite(Number(raw?.image_height)) ? Number(raw.image_height) : undefined,
+    fileUrl: typeof raw?.file_url === 'string' ? raw.file_url : undefined,
+    largeFileUrl: typeof raw?.large_file_url === 'string' ? raw.large_file_url : undefined,
+    previewFileUrl: typeof raw?.preview_file_url === 'string' ? raw.preview_file_url : undefined,
+    source: typeof raw?.source === 'string' ? raw.source : undefined,
+    tagString: typeof raw?.tag_string === 'string' ? raw.tag_string : undefined,
+    md5: typeof raw?.md5 === 'string' ? raw.md5 : undefined,
+    tagStringArtist: typeof raw?.tag_string_artist === 'string' ? raw.tag_string_artist : undefined,
+    tagStringCharacter: typeof raw?.tag_string_character === 'string' ? raw.tag_string_character : undefined,
+    tagStringCopyright: typeof raw?.tag_string_copyright === 'string' ? raw.tag_string_copyright : undefined,
+    tagStringGeneral: typeof raw?.tag_string_general === 'string' ? raw.tag_string_general : undefined,
+    tagStringMeta: typeof raw?.tag_string_meta === 'string' ? raw.tag_string_meta : undefined,
+    uploader: typeof raw?.uploader_name === 'string' ? raw.uploader_name : (typeof raw?.uploader === 'string' ? raw.uploader : undefined),
+    parentId: raw?.parent_id == null ? null : Number(raw.parent_id),
+  };
+}
+
 class DanbooruService {
   private worker: Worker;
   private pending = new Map<number,Pending>();
@@ -60,7 +177,119 @@ class DanbooruService {
   }
   public async searchAutocomplete(query:string,limit=8){const items=await this.request<Array<{name:string;category:string;count:number|null}>>('SEARCH',{query,limit});return items.map(item=>({name:item.name,category:item.category,count:item.count}))}
   public async getRandomTags(parent:string,count=2){return this.request<string[]>('GET_RANDOM_TAGS',{parent,count})}
+  public async getTagDetails(tags:string[]){return this.request<Array<Partial<TagDetail> & {tag:string; nativeCategory?:string; nativeCategoryCode?:string; postCount?:number|null}>>('GET_DETAILS',{tags})}
   public async setCategorizationMode(mode:CategorizationMode){this.stats=await this.request<Stats>('SET_MODE',{mode})}
+  public async searchRemoteTags(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTag[]> {
+    const params = new URLSearchParams();
+    const cleaned = query.trim();
+    if (cleaned) params.set('search[name_matches]', cleaned.includes('*') ? cleaned : `${cleaned}*`);
+    if (options.category !== undefined) params.set('search[category]', String(options.category));
+    params.set('search[hide_empty]', 'false');
+    params.set('limit', String(Math.min(100, Math.max(1, options.limit ?? 100))));
+    params.set('page', String(Math.max(1, Math.floor(options.page ?? 1))));
+    // Danbooru's tag listing orders are nested under search[order], not a top-level order parameter.
+    params.set('search[order]', options.order ?? 'count');
+    const raw = await fetchDanbooruJson<any[]>(`/tags.json?${params.toString()}`, options.signal);
+    return Array.isArray(raw) ? raw.map(mapRemoteTag).filter((tag) => Boolean(tag.name)) : [];
+  }
+
+  public async getRemotePosts(
+    tag: string | null,
+    page = 1,
+    limit = 48,
+    signal?: AbortSignal,
+    feed: RemotePostFeed = 'newest',
+    options: RemotePostQueryOptions = {},
+  ): Promise<RemotePost[]> {
+    const params = new URLSearchParams();
+    const safeLimit = Math.min(100, Math.max(1, limit));
+    const safePage = Math.max(1, Math.floor(page));
+    params.set('limit', String(safeLimit));
+    params.set('page', String(safePage));
+
+    const includeTags = [
+      tag ? encodeTagQuery(tag) : '',
+      ...(options.includeTags || []).map(encodeTagQuery),
+    ].filter(Boolean);
+    const excludeTags = (options.excludeTags || []).map(encodeTagQuery).filter(Boolean);
+    const buildTagQuery = (extra: string[] = []) => [...includeTags, ...extra, ...excludeTags.map((value) => `-${value}`)].join(' ').trim();
+    const normalizedTagQuery = buildTagQuery();
+    const anchorDate = options.date || new Date().toISOString().slice(0, 10);
+
+    if (feed === 'popular-day' || feed === 'popular-week' || feed === 'popular-month') {
+      const scale = feed.slice('popular-'.length);
+      params.set('scale', scale);
+      params.set('date', anchorDate);
+      if (normalizedTagQuery) params.set('search[tags]', normalizedTagQuery);
+      const raw = await fetchDanbooruJson<any[]>(`/explore/posts/popular.json?${params.toString()}`, signal);
+      return Array.isArray(raw) ? raw.map(mapRemotePost).filter((post) => post.id > 0) : [];
+    }
+
+    if (feed === 'popular-year') {
+      // The public popular explorer provides day/week/month scales. For a calendar-year
+      // view we use Danbooru's date range metatag plus score ordering, which lets the user
+      // inspect a specific historical year rather than a rolling one-year window.
+      const year = /^\d{4}/.test(anchorDate) ? anchorDate.slice(0, 4) : String(new Date().getFullYear());
+      const yearlyQuery = [`date:${year}-01-01..${year}-12-31`, ...includeTags, ...excludeTags.map((value) => `-${value}`), 'order:score'].join(' ').trim();
+      params.set('tags', yearlyQuery);
+      params.delete('page');
+      params.set('page', String(safePage));
+      const raw = await fetchDanbooruJson<any[]>(`/posts.json?${params.toString()}`, signal);
+      return Array.isArray(raw) ? raw.map(mapRemotePost).filter((post) => post.id > 0) : [];
+    }
+
+    if (normalizedTagQuery) params.set('tags', normalizedTagQuery);
+    params.set('random', 'false');
+    params.set('order', feed === 'hot' ? 'rank' : 'id_desc');
+
+    const raw = await fetchDanbooruJson<any[]>(`/posts.json?${params.toString()}`, signal);
+    return Array.isArray(raw) ? raw.map(mapRemotePost).filter((post) => post.id > 0) : [];
+  }
+
+  public async getPopularPosts(feed: Exclude<RemotePostFeed, 'newest' | 'hot'>, page = 1, limit = 48, signal?: AbortSignal, tag?: string): Promise<RemotePost[]> {
+    const params = new URLSearchParams();
+    const safePage = Math.max(1, Math.floor(page));
+    params.set('limit', String(Math.min(100, Math.max(1, limit))));
+    params.set('page', String(safePage));
+    const scale = feed === 'popular-year' ? null : feed.slice('popular-'.length);
+    if (scale) {
+      params.set('scale', scale);
+      if (tag?.trim()) params.set('search[tags]', encodeTagQuery(tag));
+      const raw = await fetchDanbooruJson<any[]>(`/explore/posts/popular.json?${params.toString()}`, signal);
+      return Array.isArray(raw) ? raw.map(mapRemotePost).filter((post) => post.id > 0) : [];
+    }
+    const year = new Date().getFullYear();
+    const tagQuery = `${tag ? encodeTagQuery(tag) + ' ' : ''}date:${year}-01-01..${year}-12-31 order:score`;
+    params.set('tags', tagQuery.trim());
+    const raw = await fetchDanbooruJson<any[]>(`/posts.json?${params.toString()}`, signal);
+    return Array.isArray(raw) ? raw.map(mapRemotePost).filter((post) => post.id > 0) : [];
+  }
+
+  public async getRemoteTagDetails(tag: string, signal?: AbortSignal): Promise<RemoteTag | null> {
+    const rows = await this.searchRemoteTags(tag, { limit: 20, order: 'count', signal });
+    const normalized = encodeTagQuery(tag);
+    return rows.find((row) => row.name === normalized) || rows[0] || null;
+  }
+
+  public async getRemoteWiki(tag: string, signal?: AbortSignal): Promise<RemoteWikiPage | null> {
+    const normalized = encodeTagQuery(tag);
+    try {
+      const raw = await fetchDanbooruJson<any>(`/wiki_pages/${encodeURIComponent(normalized)}.json`, signal);
+      if (!raw) return null;
+      return { title: String(raw?.title || normalized), body: typeof raw?.body === 'string' ? raw.body : undefined, otherNames: Array.isArray(raw?.other_names) ? raw.other_names.map(String) : undefined };
+    } catch {
+      return null;
+    }
+  }
+
+  public getRemoteTagUrl(tag: string): string {
+    return `${DANBOORU_ORIGIN}/tags/${encodeURIComponent(encodeTagQuery(tag))}`;
+  }
+
+  public getRemotePostUrl(id: number): string {
+    return `${DANBOORU_ORIGIN}/posts/${encodeURIComponent(String(id))}`;
+  }
+
   public async setSortMode(sort:SortMode){await this.request('SET_SORT',{sort})}
 }
 export const danbooru=new DanbooruService();

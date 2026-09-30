@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "popup-windows",
+  "description": "Capabilities for SwarmCanvas utility popup windows.",
+  "windows": [
+    "prompt-pills-*",
+    "tag-image-browser-*"
+  ],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
+}

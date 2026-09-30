@@ -1,8 +1,10 @@
 import { create } from 'zustand';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { swarmClient, SwarmProgressData } from '../api/swarmClient';
+import { swarmClient, SwarmProgressData, ServerImageItem, emitDiagnostic } from '../api/swarmClient';
 import { civitaiService, CivitaiAssetType } from '../api/civitaiService';
 import { emitToast } from '../utils/toast';
+import { addHistoryItemsToProject, loadProjectEntries, updateProjectEntryMetadata, removeProjectEntries } from '../api/projectStorage';
 
 export interface ModelItem {
   name: string;
@@ -53,6 +55,16 @@ export interface HistoryItem {
   prompt: string;
   negativePrompt?: string;
   createdAt: string;
+  /** Raw SwarmUI metadata returned by /API/ListImages for server-history entries. */
+  rawMetadata?: string;
+  /** Whether this entry originated from the SwarmUI server history scan. */
+  serverOrigin?: boolean;
+  /** Original server history path, before conversion to /View/... . */
+  serverPath?: string;
+  /** Local Project relative filename, present only for images stored in the Local Project folder. */
+  localProjectFile?: string;
+  /** Absolute Local Project root used for this file. Preserved so older entries remain addressable after the setting changes. */
+  localProjectRoot?: string;
   timestamp: number;
   isFavorite?: boolean;
   /** id of the HistoryItem this generation branched from (reroll / variation / edit), if any. */
@@ -123,6 +135,25 @@ export interface QueueItem {
   relation?: 'variation' | 'branch';
 }
 
+function formatStoreError(error: unknown): string {
+  if (error instanceof Error) {
+    if (error.message) return `${error.name ? `${error.name}: ` : ''}${error.message}`;
+    return error.name || 'Error';
+  }
+  if (typeof error === 'string') return error;
+  if (error && typeof error === 'object') {
+    const value = error as Record<string, unknown>;
+    const message = value.message ?? value.error ?? value.kind ?? value.code;
+    if (typeof message === 'string' && message.trim()) return message;
+    try {
+      const serialized = JSON.stringify(error, Object.getOwnPropertyNames(error));
+      if (serialized && serialized !== '{}') return serialized;
+    } catch { /* fall through */ }
+    try { return String(error); } catch { /* fall through */ }
+  }
+  return String(error ?? 'unknown error');
+}
+
 export interface AppSettings {
   activePreset: 'Default' | 'Prompt Engineer' | 'Studio Canvas' | 'Multi-ControlNet';
   bottomPanelHeight: number;
@@ -156,7 +187,17 @@ export interface AppSettings {
   saveBeforeAfterADetailer: boolean;
   autoCivitaiScan: boolean;
   galleryPageSize: number;
-  gallerySource: 'app' | 'all';
+  gallerySource: 'session' | 'project' | 'outputs';
+  galleryGroupByQueue: boolean;
+  saveGeneratedImagesToProject: boolean;
+  /** User-selected root folder for SwarmCanvas Local Project output. Empty means the app default. */
+  localProjectPath: string;
+  projectJpegQuality: number;
+  projectJpegMaxDimension: number;
+  projectJpegBackground: 'black' | 'white';
+  projectJpegFilenamePrefix: string;
+  projectImageFormat: 'original' | 'jpg' | 'jpeg' | 'png' | 'webp';
+  outputFolderPath: string;
   /** Crash/refresh recovery: when true, a leftover queue from a previous session resumes
    *  processing automatically on launch instead of waiting for the user to confirm. */
   autoResumeQueueOnLaunch: boolean;
@@ -172,6 +213,12 @@ export interface AppSettings {
   uiTheme: 'obsidian' | 'arctic' | 'paper' | 'terminal' | 'midnight' | 'forest' | 'clay' | 'mono' | 'contrast' | 'nord' | 'dracula' | 'solarized' | 'rose' | 'coffee' | 'matrix' | 'sunset' | 'cyber_black' | 'classic';
   fontScale: number;
   autoApplyModelPreset: boolean;
+  hideInlineLorasInPromptBoxes: boolean;
+  showPromptSectionHeaders: boolean;
+  showPromptSectionStats: boolean;
+  showPromptSelectionToolbar: boolean;
+  promptSyntaxQuickInsert: boolean;
+  doubleClickEditPromptPills: boolean;
 }
 
 let generationRunToken = 0;
@@ -185,6 +232,88 @@ export function stripDisabledPromptTags(rawText: string): string {
     .map((t) => t.trim())
     .filter(Boolean)
     .join(', ');
+}
+
+function parseMetadataObject(raw?: string): Record<string, any> | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let value: unknown = raw;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (typeof value === 'object' && value !== null) return value as Record<string, any>;
+    if (typeof value !== 'string') return null;
+    const text = value.trim();
+    if (!text) return null;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+  return typeof value === 'object' && value !== null ? value as Record<string, any> : null;
+}
+
+function metadataNumber(value: unknown, fallback?: number): number | undefined {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function metadataString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return value == null ? undefined : String(value);
+  const clean = value.trim();
+  return clean || undefined;
+}
+
+function stableServerImageId(path: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < path.length; i++) {
+    hash ^= path.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `server-${(hash >>> 0).toString(36)}`;
+}
+
+function inferServerTimestamp(path: string, fallback: number): number {
+  const match = path.match(/(?:^|\/)(\d{4}-\d{2}-\d{2})\/(\d{2})(\d{2})(?:\d{2})?(?:[-_]|$)/);
+  if (!match) return fallback;
+  const parsed = new Date(`${match[1]}T${match[2]}:${match[3]}:00`).getTime();
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseServerImageMetadata(image: ServerImageItem, fallbackTimestamp: number): {
+  prompt?: string;
+  negativePrompt?: string;
+  timestamp: number;
+  isFavorite?: boolean;
+  batchId?: string;
+  params: HistoryItem['params'];
+} {
+  const root = parseMetadataObject(image.metadata);
+  const rawParams = root?.sui_image_params || root?.params || root || {};
+  const extra = root?.sui_extra_data || {};
+
+  const prompt = metadataString(rawParams.prompt ?? rawParams.Prompt ?? extra.original_prompt);
+  const negativePrompt = metadataString(rawParams.negativeprompt ?? rawParams.negative_prompt ?? rawParams['Negative Prompt']);
+  const timestamp = inferServerTimestamp(image.name, fallbackTimestamp);
+  const starredRaw = root?.is_starred ?? rawParams.is_starred ?? extra.is_starred;
+  const isFavorite = typeof starredRaw === 'boolean' ? starredRaw : undefined;
+  const batchId = metadataString(rawParams.batchId ?? rawParams.batch_id ?? extra.batchId ?? extra.batch_id ?? root?.batchId ?? root?.batch_id);
+
+  return {
+    prompt,
+    negativePrompt,
+    timestamp,
+    isFavorite,
+    batchId,
+    params: {
+      model: metadataString(rawParams.model) || 'Unknown',
+      steps: metadataNumber(rawParams.steps, 28) || 28,
+      cfgScale: metadataNumber(rawParams.cfgscale ?? rawParams.cfg_scale ?? rawParams.cfg),
+      seed: metadataNumber(rawParams.seed),
+      width: metadataNumber(rawParams.width),
+      height: metadataNumber(rawParams.height),
+      sampler: metadataString(rawParams.sampler),
+      scheduler: metadataString(rawParams.scheduler),
+    },
+  };
 }
 
 export const SWARM_VALID_SAMPLERS = [
@@ -249,7 +378,17 @@ export interface AppState {
 
   history: HistoryItem[];
   galleryHistory: HistoryItem[];
+  projectHistory: HistoryItem[];
+  /** Total number of files in the configured All Outputs root. Only lightweight index data is cached natively. */
+  outputGalleryTotalCount: number;
+  /** Highest output page index that has been cached. With direct page jumps this is not a count. */
+  outputGalleryLoadedPages: number;
+  /** Individual All Outputs pages that are cached; allows instant navigation back to old pages and direct jumps. */
+  outputGalleryLoadedPageNumbers: number[];
+  /** Page -> already materialized gallery entries for All Outputs. Not persisted. */
+  outputGalleryPages: Record<number, HistoryItem[]>;
   galleryCurrentPage: number;
+  generationViewerItem: HistoryItem | null;
   emptyBatches: string[];
 
   prompt: string;
@@ -331,6 +470,7 @@ export interface AppState {
   setActiveSubCategory: (c: string) => void;
   setPillSearchQuery: (q: string) => void;
   setGalleryCurrentPage: (page: number) => void;
+  setGenerationViewerItem: (item: HistoryItem | null) => void;
 
   toggleFavorite: (id: string) => void;
   currentQueueBatchId: string | null;
@@ -343,8 +483,12 @@ export interface AppState {
 
   setModel: (m: string) => void;
   setParams: (params: Partial<AppState>) => void;
-  loadAssets: () => Promise<void>;
-  syncServerGallery: () => Promise<void>;
+  loadAssets: (forceRefresh?: boolean) => Promise<void>;
+  syncServerGallery: (refresh?: boolean) => Promise<void>;
+  loadMoreServerGalleryPages: (startPage: number, pageCount?: number) => Promise<void>;
+  loadServerGalleryPage: (page: number) => Promise<void>;
+  loadProjectGallery: () => Promise<void>;
+  saveImagesToProject: (items: HistoryItem[]) => Promise<HistoryItem[]>;
   syncCivitaiMetadata: (
     category: string,
     onProgress: (current: number, total: number, name: string) => void
@@ -408,18 +552,20 @@ export const useAppStore = create<AppState>()(
       serverUrl: 'http://localhost:7801',
       sessionId: null,
       isConnected: false,
-      sessionStartTime: (() => {
-        const existing = sessionStorage.getItem('swarm_session_start');
-        if (existing) return Number(existing);
-        const now = Date.now();
-        sessionStorage.setItem('swarm_session_start', String(now));
-        return now;
-      })(),
+      // Deliberately not persisted: the default Gallery source is the current app session.
+      // A reload/new app launch starts a fresh gallery session.
+      sessionStartTime: Date.now(),
       hideProgressBar: false,
 
       history: [],
       galleryHistory: [],
+      projectHistory: [],
+      outputGalleryTotalCount: 0,
+      outputGalleryLoadedPages: 0,
+      outputGalleryLoadedPageNumbers: [],
+      outputGalleryPages: {},
       galleryCurrentPage: 1,
+      generationViewerItem: null,
       emptyBatches: [],
 
       prompt: 'masterpiece, best quality, 1girl, solo',
@@ -639,7 +785,16 @@ export const useAppStore = create<AppState>()(
         saveBeforeAfterADetailer: false,
         autoCivitaiScan: true,
         galleryPageSize: 24,
-        gallerySource: 'app',
+        gallerySource: 'session',
+        galleryGroupByQueue: false,
+        saveGeneratedImagesToProject: false,
+        localProjectPath: '',
+        projectJpegQuality: 92,
+        projectJpegMaxDimension: 2048,
+        projectJpegBackground: 'black',
+        projectJpegFilenamePrefix: 'SwarmCanvas',
+        projectImageFormat: 'jpg',
+        outputFolderPath: '',
         autoResumeQueueOnLaunch: false,
         panelViewModes: {
           extraNetworks: 'cards',
@@ -649,9 +804,18 @@ export const useAppStore = create<AppState>()(
         uiTheme: 'obsidian',
         fontScale: 100,
         autoApplyModelPreset: false,
+        hideInlineLorasInPromptBoxes: true,
+        showPromptSectionHeaders: true,
+        showPromptSectionStats: true,
+        showPromptSelectionToolbar: true,
+        promptSyntaxQuickInsert: true,
+        doubleClickEditPromptPills: true,
       },
 
-      toggleFavorite: (id: string) =>
+      toggleFavorite: (id: string) => {
+        const nextProject = get().projectHistory.map((item) =>
+          item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
+        );
         set((s) => ({
           history: s.history.map((item) =>
             item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
@@ -659,7 +823,15 @@ export const useAppStore = create<AppState>()(
           galleryHistory: s.galleryHistory.map((item) =>
             item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
           ),
-        })),
+          projectHistory: nextProject,
+        }));
+        const changedProjectItem = nextProject.find((item) => item.id === id);
+        if (changedProjectItem) {
+          void updateProjectEntryMetadata(changedProjectItem).catch((error) => {
+            console.warn('[ProjectStorage] Could not persist favorite change:', error);
+          });
+        }
+      },
 
       activeContextMenu: null,
       setActiveContextMenu: (activeContextMenu) => set({ activeContextMenu }),
@@ -674,7 +846,6 @@ export const useAppStore = create<AppState>()(
       setGalleryCurrentPage: (galleryCurrentPage) => set({ galleryCurrentPage }),
 
       setModel: (model) => {
-        const isAnima = model.toLowerCase().includes('anima');
         const linkedPresetId = (() => {
           if (typeof localStorage === 'undefined') return null;
           if (!get().settings.autoApplyModelPreset) return null;
@@ -689,24 +860,25 @@ export const useAppStore = create<AppState>()(
             model,
             prompt: linked?.target === 'positive' ? linked.text : s.prompt,
             negativePrompt: linked?.target === 'negative' ? linked.text : s.negativePrompt,
-            cfgScale: isAnima && s.cfgScale > 5.0 ? 4.0 : s.cfgScale,
-            steps: isAnima && s.steps === 20 ? 28 : s.steps,
-            sampler: s.sampler,
-            scheduler: s.scheduler,
-            textEncoder: isAnima && s.textEncodersList.some(t => t.includes('qwen'))
-              ? s.textEncodersList.find(t => t.includes('qwen'))!
-              : s.textEncoder,
           };
         });
       },
       setParams: (params) => set((s) => ({ ...s, ...params })),
 
-      deleteHistoryItem: (id) =>
+      deleteHistoryItem: (id) => {
+        const projectItem = get().projectHistory.find((h) => h.id === id);
         set((s) => ({
           history: s.history.filter((h) => h.id !== id),
           galleryHistory: s.galleryHistory.filter((h) => h.id !== id),
+          projectHistory: s.projectHistory.filter((h) => h.id !== id),
           activeImage: s.activeImage === s.history.find((h) => h.id === id)?.imageUrl ? null : s.activeImage,
-        })),
+        }));
+        if (projectItem) {
+          void removeProjectEntries([projectItem]).then((next) => set({ projectHistory: next })).catch((error) => {
+            console.warn('[ProjectStorage] Could not remove project image:', error);
+          });
+        }
+      },
 
       removeFromSessionHistory: (id) =>
         set((s) => ({
@@ -728,9 +900,15 @@ export const useAppStore = create<AppState>()(
       deletePromptPreset: (id) =>
         set((s) => ({ promptPresets: (s.promptPresets || []).filter((p) => p.id !== id) })),
 
-      loadAssets: async () => {
+      loadAssets: async (forceRefresh = false) => {
         try {
-          await swarmClient.triggerRefresh().catch(() => {});
+          if (forceRefresh && get().isGenerating) return;
+          swarmClient.setBaseUrl(get().serverUrl || 'http://localhost:7801');
+          // Do not force a SwarmUI/Comfy backend refresh during normal app startup,
+          // focus recovery, or catalog rehydration. TriggerRefresh can restart or
+          // rescan a broken Comfy backend and is only appropriate for an explicit
+          // user-requested asset refresh.
+          if (forceRefresh) await swarmClient.triggerRefresh().catch(() => {});
 
           const [models, loras, embeddings, wildcards, vaes, textEncoders, yoloModels] = await Promise.all([
             swarmClient.listModels('Stable-Diffusion').catch(() => []),
@@ -805,18 +983,34 @@ export const useAppStore = create<AppState>()(
           const formattedLoras = formatItems(loras);
           const formattedEmbeddings = formatItems(embeddings);
 
-          set((s) => ({
-            modelsList: formattedModels.length > 0 ? merge(formattedModels, s.modelsList, 'model') : s.modelsList,
-            lorasList: formattedLoras.length > 0 ? merge(formattedLoras, s.lorasList, 'lora') : s.lorasList,
-            embeddingsList: formattedEmbeddings.length > 0 ? merge(formattedEmbeddings, s.embeddingsList, 'embedding') : s.embeddingsList,
-            wildcardsList: wildcards && wildcards.length > 0 ? wildcards.map((w: any) => (typeof w === 'string' ? w : w.name || String(w))) : s.wildcardsList,
-            vaesList: vaes && vaes.length > 0 ? vaes : s.vaesList,
-            textEncodersList: textEncoders && textEncoders.length > 0 ? textEncoders : s.textEncodersList,
-            yoloModelsList: yoloModels && yoloModels.length > 0 ? yoloModels : s.yoloModelsList,
-            model: s.model || (formattedModels.length > 0 ? formattedModels[0].name : s.model),
-            vae: s.vae || 'Automatic',
-            textEncoder: s.textEncoder || 'Automatic',
-          }));
+          set((s) => {
+            const nextVaes = vaes && vaes.length > 0 ? vaes : s.vaesList;
+            const nextTextEncoders = Array.from(new Set([
+              'Automatic',
+              'None',
+              'qwen_3_06b_base.safetensors',
+              'qwen35_4b.safetensors',
+              ...(textEncoders || []),
+              ...(s.textEncodersList || []),
+            ]));
+            const nextPrimaryTextEncoder = nextTextEncoders.includes(s.textEncoder) ? s.textEncoder : 'Automatic';
+            const nextSecondaryTextEncoder = nextTextEncoders.includes(s.textEncoder2) ? s.textEncoder2 : 'Automatic';
+            const validSelectedTextEncoders = s.selectedTextEncoders.filter((value) => nextTextEncoders.includes(value));
+            return {
+              modelsList: formattedModels.length > 0 ? merge(formattedModels, s.modelsList, 'model') : s.modelsList,
+              lorasList: formattedLoras.length > 0 ? merge(formattedLoras, s.lorasList, 'lora') : s.lorasList,
+              embeddingsList: formattedEmbeddings.length > 0 ? merge(formattedEmbeddings, s.embeddingsList, 'embedding') : s.embeddingsList,
+              wildcardsList: wildcards && wildcards.length > 0 ? wildcards.map((w: any) => (typeof w === 'string' ? w : w.name || String(w))) : s.wildcardsList,
+              vaesList: nextVaes,
+              textEncodersList: nextTextEncoders,
+              selectedTextEncoders: validSelectedTextEncoders,
+              textEncoder: nextPrimaryTextEncoder,
+              textEncoder2: nextSecondaryTextEncoder,
+              yoloModelsList: yoloModels && yoloModels.length > 0 ? yoloModels : s.yoloModelsList,
+              model: s.model || (formattedModels.length > 0 ? formattedModels[0].name : s.model),
+              vae: nextVaes.includes(s.vae) ? s.vae : 'Automatic',
+            };
+          });
           set({ isConnected: await swarmClient.testConnection() });
         } catch (err) {
           console.error('[Store] Failed to load asset catalogs:', err);
@@ -824,46 +1018,186 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      syncServerGallery: async () => {
+      syncServerGallery: async (refresh = true) => {
         try {
-          const serverImgs = await swarmClient.listServerImages();
-          if (serverImgs.length === 0) return;
+          const configuredPath = get().settings.outputFolderPath || undefined;
+          // Count/index first; the native side stores only file-path metadata in memory.
+          // No image metadata or image bytes are sent to the WebView at this stage.
+          const count = await swarmClient.getLocalOutputImageCount(configuredPath, refresh);
+          const pageSize = Math.max(12, get().settings.galleryPageSize || 24);
+          set((s) => ({
+            galleryHistory: [],
+            outputGalleryTotalCount: count.total,
+            outputGalleryLoadedPages: 0,
+            outputGalleryLoadedPageNumbers: [],
+            outputGalleryPages: {},
+            galleryCurrentPage: 1,
+            settings: { ...s.settings, outputFolderPath: count.root },
+          }));
 
-          const currentUrls = new Set(get().galleryHistory.map((h) => h.imageUrl));
-          const additions: HistoryItem[] = [];
-          const now = Date.now();
+          if (count.total > 0) {
+            await get().loadMoreServerGalleryPages(1, 5);
+          }
 
-          serverImgs.forEach((img: { url: string; name: string }, i: number) => {
-            if (!currentUrls.has(img.url)) {
-              additions.push({
-                id: `server-${now}-${i}`,
-                batchId: `batch-server-${now}`,
-                imageUrl: img.url,
-                prompt: img.name.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'Server image',
-                negativePrompt: '',
-                createdAt: new Date().toLocaleTimeString(),
-                timestamp: now - i * 1000,
-                params: {
-                  model: get().model || 'Unknown',
-                  steps: 28,
-                  cfgScale: 6.5,
-                  seed: -1,
-                  width: 832,
-                  height: 1216,
-                  sampler: 'euler_ancestral',
-                  scheduler: 'normal',
-                },
-              });
-            }
+          emitDiagnostic({
+            level: 'info',
+            scope: 'image',
+            message: `All Outputs index ready: ${count.total.toLocaleString()} image(s) in ${count.root}. Initializing first 5 pages (${pageSize} images/page).`,
+            details: { total: count.total, root: count.root, initialPages: 5, pageSize },
           });
+        } catch (err) {
+          console.error('[Store] Failed to scan output folder:', err);
+          emitToast(`Output scan failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        }
+      },
 
-          if (additions.length > 0) {
-            set((s) => ({
-              galleryHistory: [...s.galleryHistory, ...additions].slice(0, s.settings.maxHistoryCount || 5000),
-            }));
+      loadMoreServerGalleryPages: async (startPage, pageCount = 5) => {
+        try {
+          const configuredPath = get().settings.outputFolderPath || undefined;
+          const pageSize = Math.max(12, get().settings.galleryPageSize || 24);
+          const safeStartPage = Math.max(1, Math.floor(startPage));
+          const safePageCount = Math.min(5, Math.max(1, Math.floor(pageCount)));
+          const totalPages = Math.max(1, Math.ceil((get().outputGalleryTotalCount || 0) / pageSize));
+          const boundedStart = Math.min(safeStartPage, totalPages);
+
+          // Do not rescan pages we already have. This is especially important when the user
+          // jumps from page 14 back to page 1 or directly to the final page of a large library.
+          const wantedPages = Array.from({ length: safePageCount }, (_, i) => boundedStart + i)
+            .filter((page) => page <= totalPages);
+          const missingPages = wantedPages.filter((page) => !get().outputGalleryPages[page]);
+          if (!missingPages.length) return;
+
+          // Fetch contiguous missing runs in chunks of five. The native scanner supports an
+          // arbitrary starting page, so a direct jump does not require loading pages 1..N.
+          let runStart = missingPages[0];
+          let runEnd = runStart;
+          const runs: Array<{ start: number; count: number }> = [];
+          for (let i = 1; i < missingPages.length; i += 1) {
+            const page = missingPages[i];
+            if (page === runEnd + 1 && page - runStart < 5) {
+              runEnd = page;
+            } else {
+              runs.push({ start: runStart, count: runEnd - runStart + 1 });
+              runStart = page;
+              runEnd = page;
+            }
+          }
+          runs.push({ start: runStart, count: runEnd - runStart + 1 });
+
+          for (const run of runs) {
+            const scan = await swarmClient.listLocalOutputImagePages(
+              configuredPath,
+              run.start,
+              run.count,
+              pageSize,
+            );
+            const now = Date.now();
+            const existing = get().galleryHistory || [];
+            const byPath = new Map(existing.map((item) => [item.serverPath || item.imageUrl, item]));
+            const pageBuckets = new Map<number, HistoryItem[]>();
+
+            scan.images.forEach((img, index) => {
+              const pageNumber = scan.startPage + Math.floor(index / scan.pageSize);
+              const old = byPath.get(img.relativePath);
+              const parsedImage: ServerImageItem = {
+                url: img.relativePath,
+                name: img.relativePath,
+                metadata: img.metadata,
+              };
+              const parsed = parseServerImageMetadata(parsedImage, img.modifiedAt || now - index);
+              const filenamePrompt = img.name.replace(/\.[^/.]+$/, '') || 'Output image';
+
+              const item: HistoryItem = {
+                ...old,
+                id: old?.id || stableServerImageId(img.relativePath),
+                batchId: parsed.batchId || old?.batchId || `batch-output-${stableServerImageId(img.relativePath)}`,
+                imageUrl: (() => {
+                  try { return convertFileSrc(img.path); } catch { return img.relativePath; }
+                })(),
+                prompt: parsed.prompt || old?.prompt || filenamePrompt,
+                negativePrompt: parsed.negativePrompt ?? old?.negativePrompt ?? '',
+                isFavorite: parsed.isFavorite ?? old?.isFavorite ?? /(?:^|\/)Starred(?:\/|$)/i.test(img.relativePath),
+                createdAt: old?.createdAt || new Date(img.modifiedAt || now - index).toLocaleTimeString(),
+                timestamp: img.modifiedAt || old?.timestamp || parsed.timestamp,
+                rawMetadata: img.metadata || old?.rawMetadata,
+                serverOrigin: true,
+                serverPath: img.relativePath,
+                params: {
+                  model: parsed.params.model !== 'Unknown' ? parsed.params.model : (old?.params.model || 'Unknown'),
+                  steps: parsed.params.steps || old?.params.steps || 28,
+                  cfgScale: parsed.params.cfgScale ?? old?.params.cfgScale ?? 6.5,
+                  seed: parsed.params.seed ?? old?.params.seed ?? -1,
+                  width: parsed.params.width ?? old?.params.width ?? 832,
+                  height: parsed.params.height ?? old?.params.height ?? 1216,
+                  sampler: parsed.params.sampler || old?.params.sampler || 'euler_ancestral',
+                  scheduler: parsed.params.scheduler || old?.params.scheduler || 'normal',
+                },
+              };
+
+              byPath.set(img.relativePath, item);
+              const bucket = pageBuckets.get(pageNumber) || [];
+              bucket.push(item);
+              pageBuckets.set(pageNumber, bucket);
+            });
+
+            const merged = [...byPath.values()]
+              .sort((a, b) => b.timestamp - a.timestamp)
+              .slice(0, Math.max(5000, get().settings.maxHistoryCount || 5000));
+
+            set((s) => {
+              const nextPages = { ...s.outputGalleryPages };
+              for (const [pageNumber, items] of pageBuckets.entries()) nextPages[pageNumber] = items;
+              const nextLoadedNumbers = Array.from(new Set([
+                ...(s.outputGalleryLoadedPageNumbers || []),
+                ...pageBuckets.keys(),
+              ])).filter((page) => page >= 1 && page <= totalPages).sort((a, b) => a - b);
+              const nextLoadedMax = nextLoadedNumbers.length ? Math.max(...nextLoadedNumbers) : 0;
+              return {
+                galleryHistory: merged,
+                outputGalleryPages: nextPages,
+                outputGalleryLoadedPageNumbers: nextLoadedNumbers,
+                outputGalleryLoadedPages: nextLoadedMax,
+                outputGalleryTotalCount: scan.total,
+                settings: { ...s.settings, outputFolderPath: scan.root },
+              };
+            });
           }
         } catch (err) {
-          console.error('[Store] Failed to sync server gallery:', err);
+          console.error('[Store] Failed to load output gallery pages:', err);
+          emitToast(`Output page load failed: ${formatStoreError(err)}`, 'error');
+        }
+      },
+
+      loadServerGalleryPage: async (page) => {
+        const target = Math.max(1, Math.floor(page));
+        if (get().outputGalleryPages[target]) return;
+        await get().loadMoreServerGalleryPages(target, 1);
+      },
+
+      loadProjectGallery: async () => {
+        try {
+          const entries = await loadProjectEntries(get().settings.localProjectPath);
+          set({ projectHistory: entries });
+        } catch (error) {
+          console.error('[Store] Failed to load local project:', error);
+          emitToast(`Project load failed: ${formatStoreError(error)}`, 'error');
+        }
+      },
+
+      saveImagesToProject: async (items) => {
+        if (!items.length) return [];
+        try {
+          const merged = await addHistoryItemsToProject(items, get().settings);
+          set({ projectHistory: merged });
+          const savedById = new Map(merged.map((item) => [item.id, item]));
+          const saved = items.map((item) => savedById.get(item.id)).filter((item): item is HistoryItem => Boolean(item?.localProjectFile));
+          const format = get().settings.projectImageFormat || 'jpg';
+          emitToast(`Saved ${saved.length} image${saved.length === 1 ? '' : 's'} (${format.toUpperCase()}) to Local Project.`, 'success');
+          return saved;
+        } catch (error) {
+          console.error('[Store] Failed to save images to local project:', formatStoreError(error), error);
+          emitToast(`Local Project save failed: ${formatStoreError(error)}`, 'error');
+          throw error;
         }
       },
 
@@ -905,6 +1239,8 @@ export const useAppStore = create<AppState>()(
           }
         }
       },
+
+      setGenerationViewerItem: (generationViewerItem) => set({ generationViewerItem }),
 
       setIsComparing: (isComparing) => set({ isComparing }),
       setComparisonImage: (comparisonImage) => set({ comparisonImage }),
@@ -1011,7 +1347,7 @@ export const useAppStore = create<AppState>()(
       },
 
       startQueueProcessing: async () => {
-        if (get().isGenerating || get().queue.length === 0) return;
+        if (get().isGenerating || !get().queue.some((job) => job.status === 'queued')) return;
 
         const runToken = ++generationRunToken;
         const interruptToAwait = pendingInterruptPromise;
@@ -1028,14 +1364,17 @@ export const useAppStore = create<AppState>()(
         let completedCount = 0;
         let failedCount = 0;
 
-        while (get().queue.length > 0 && generationRunToken === runToken) {
+        while (get().queue.some((job) => job.status === 'queued') && generationRunToken === runToken) {
           if (get().isQueuePaused) {
             await new Promise((r) => setTimeout(r, 400));
             continue;
           }
 
           const currentQueue = get().queue;
-          const [nextJob, ...remainingQueue] = currentQueue;
+          const nextIndex = currentQueue.findIndex((job) => job.status === 'queued');
+          if (nextIndex < 0) break;
+          const nextJob = currentQueue[nextIndex];
+          const remainingQueue = currentQueue.filter((_, index) => index !== nextIndex);
 
           set({
             queue: remainingQueue,
@@ -1202,27 +1541,86 @@ export const useAppStore = create<AppState>()(
             const shouldAutoSwap = get().settings.autoSwapToLatest;
             const limit = Math.max(1000, get().settings?.maxHistoryCount || 5000);
 
+            const storageSettings = get().settings;
+            const shouldStoreInProject = storageSettings.saveGeneratedImagesToProject;
+            let storedHistoryItems = newHistoryItems;
+
+            if (shouldStoreInProject) {
+              // Wait for the local file to be safely written before deleting the
+              // original SwarmUI output. This makes the setting a real storage
+              // switch while preserving the server output if local storage fails.
+              try {
+                const savedItems = await get().saveImagesToProject(newHistoryItems);
+                if (savedItems.length === newHistoryItems.length) {
+                  storedHistoryItems = newHistoryItems.map((item) => savedItems.find((saved) => saved.id === item.id) || item);
+                  await Promise.all(newHistoryItems.map(async (item) => {
+                    try {
+                      await swarmClient.deleteImageFromHistory(item.imageUrl);
+                    } catch (deleteError) {
+                      console.warn('[Store] Local Project image saved but original SwarmUI output could not be removed:', deleteError);
+                    }
+                  }));
+                } else {
+                  console.warn('[Store] Local Project save was incomplete; retaining original SwarmUI outputs.');
+                }
+              } catch (storageError) {
+                console.error('[Store] Local Project storage failed; retaining normal SwarmUI output:', formatStoreError(storageError), storageError);
+                emitToast('Local Project storage failed; the generation was kept in the normal Stability Matrix output folder.', 'error');
+                storedHistoryItems = newHistoryItems;
+              }
+            }
+
+            // The native All Outputs index is intentionally cached. Invalidate it whenever a
+            // generation changes the underlying output tree so subsequent progressive pages
+            // are based on the current filesystem rather than a stale file list.
+            if (storageSettings.gallerySource === 'outputs') {
+              void swarmClient.invalidateLocalOutputImageIndex(storageSettings.outputFolderPath || undefined).catch((indexError) => {
+                console.warn('[Store] Could not invalidate All Outputs index:', indexError);
+              });
+            }
+
             set((s) => ({
-              activeImage: shouldAutoSwap && newHistoryItems.length > 0 ? newHistoryItems[0].imageUrl : s.activeImage,
+              activeImage: shouldAutoSwap && storedHistoryItems.length > 0 ? storedHistoryItems[0].imageUrl : s.activeImage,
               livePreview: null,
               progressPercent: 100,
               metrics: { ...s.metrics, stage: 'Complete', totalTime: duration },
-              history: [...newHistoryItems, ...s.history].slice(0, limit),
-              galleryHistory: [...newHistoryItems, ...s.galleryHistory].slice(0, limit),
+              history: [...storedHistoryItems, ...s.history].slice(0, limit),
+              // galleryHistory is reserved for the All Outputs dataset. Session generations
+              // stay in `history`, and Local Project generations stay in `projectHistory`.
+              galleryHistory: storageSettings.gallerySource === 'outputs' && !shouldStoreInProject
+                ? [...storedHistoryItems, ...s.galleryHistory]
+                : s.galleryHistory,
+              outputGalleryTotalCount: s.settings.gallerySource === 'outputs' && !shouldStoreInProject
+                ? s.outputGalleryTotalCount + storedHistoryItems.length
+                : s.outputGalleryTotalCount,
             }));
 
             completedCount += 1;
 
           } catch (e: any) {
-            if (generationRunToken !== runToken) break;
-            console.error('Queue job failure:', e);
+            const errorMessage = formatStoreError(e);
+            if (generationRunToken !== runToken) {
+              // Cancellation/interruption should never silently destroy the active job.
+              // Keep it visible as canceled so the user can retry it explicitly.
+              set((s) => ({
+                queue: s.queue.some((job) => job.id === nextJob.id)
+                  ? s.queue
+                  : [{ ...nextJob, status: 'canceled', progress: s.progressPercent, step: s.currentStep, maxSteps: s.maxSteps }, ...s.queue],
+                activeJob: null,
+              }));
+              break;
+            }
+            console.error('Queue job failure:', errorMessage, e);
             failedCount += 1;
-            emitToast(`Generation failed: ${e?.message || 'unknown error'}`, 'error');
+            emitToast(`Generation failed: ${errorMessage}`, 'error');
             set((s) => ({
+              // Failed jobs remain in the persistent queue instead of disappearing. They are
+              // not automatically retried; the user can inspect/remove/retry them.
+              queue: [{ ...nextJob, status: 'failed', progress: s.progressPercent, step: s.currentStep, maxSteps: s.maxSteps }, ...s.queue],
               lastFailedJob: { ...nextJob, status: 'failed', progress: s.progressPercent, step: s.currentStep, maxSteps: s.maxSteps },
               metrics: {
                 ...s.metrics,
-                stage: `Error: ${e?.message || 'Generation aborted'}`,
+                stage: `Error: ${errorMessage}`,
               },
             }));
           }
@@ -1297,7 +1695,22 @@ export const useAppStore = create<AppState>()(
           pendingInterruptPromise = null;
         }
 
-        set({ isGenerating: false, activeJob: null, sessionId: null, livePreview: null, previewHistory: [], generationStartedAt: null, currentQueueBatchId: null, currentStep: 0, progressPercent: 0, metrics: { ...get().metrics, stage: 'Interrupted' } });
+        const interruptedJob = get().activeJob;
+        set((s) => ({
+          isGenerating: false,
+          activeJob: null,
+          queue: interruptedJob
+            ? [{ ...interruptedJob, status: 'canceled', progress: s.progressPercent, step: s.currentStep, maxSteps: s.maxSteps }, ...s.queue]
+            : s.queue,
+          sessionId: null,
+          livePreview: null,
+          previewHistory: [],
+          generationStartedAt: null,
+          currentQueueBatchId: null,
+          currentStep: 0,
+          progressPercent: 0,
+          metrics: { ...s.metrics, stage: 'Interrupted' },
+        }));
         emitToast('Generation cancelled', 'warning');
       },
 
@@ -1454,17 +1867,87 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'swarm_canvas_persisted_store',
-      version: 3,
+      version: 7,
       storage: createJSONStorage(() => localStorage),
+      // Persisted settings may come from an older build with only a subset of the current
+      // settings keys. A shallow Zustand merge would replace the entire settings object and
+      // leave newly introduced keys undefined. Deep-merge the settings tree against the current
+      // defaults on every rehydrate so adding/changing a storage path can never blank unrelated
+      // settings.
+      merge: (persistedState: any, currentState: any) => {
+        const persisted = persistedState || {};
+        const current = currentState || {};
+        return {
+          ...current,
+          ...persisted,
+          settings: {
+            ...(current.settings || {}),
+            ...(persisted.settings || {}),
+            sectionScales: {
+              ...((current.settings && current.settings.sectionScales) || {}),
+              ...((persisted.settings && persisted.settings.sectionScales) || {}),
+            },
+            panelViewModes: {
+              ...((current.settings && current.settings.panelViewModes) || {}),
+              ...((persisted.settings && persisted.settings.panelViewModes) || {}),
+            },
+          },
+        };
+      },
       migrate: (persistedState: any) => {
         const next = { ...persistedState, settings: { ...(persistedState?.settings || {}) } };
+        if (typeof next.settings.activePreset !== 'string') next.settings.activePreset = 'Default';
+        if (typeof next.settings.bottomPanelHeight !== 'number') next.settings.bottomPanelHeight = 340;
+        if (!next.settings.sectionScales || typeof next.settings.sectionScales !== 'object') next.settings.sectionScales = {};
+        next.settings.sectionScales = { pills: 100, params: 100, extranetworks: 100, history: 100, controlnet: 100, adetailer: 100, imagesearch: 100, ...(next.settings.sectionScales || {}) };
+        if (typeof next.settings.hideProgressBar !== 'boolean') next.settings.hideProgressBar = false;
+        if (typeof next.settings.categorizationMode !== 'string') next.settings.categorizationMode = 'prompt_flow';
+        if (typeof next.settings.tagSortOrder !== 'string') next.settings.tagSortOrder = 'alphabetical';
+        if (typeof next.settings.autoInjectLoraTrigger !== 'boolean') next.settings.autoInjectLoraTrigger = true;
+        if (typeof next.settings.autoInjectModelKeywords !== 'boolean') next.settings.autoInjectModelKeywords = true;
+        if (typeof next.settings.showTagPlusPrefix !== 'boolean') next.settings.showTagPlusPrefix = true;
+        if (typeof next.settings.showTagPostCounts !== 'boolean') next.settings.showTagPostCounts = true;
+        if (typeof next.settings.useUnderscores !== 'boolean') next.settings.useUnderscores = false;
+        if (typeof next.settings.tagClickWeightStep !== 'number') next.settings.tagClickWeightStep = 0.2;
+        if (typeof next.settings.preservePromptsOnReload !== 'boolean') next.settings.preservePromptsOnReload = true;
+        if (typeof next.settings.randomizeSeedOnGen !== 'boolean') next.settings.randomizeSeedOnGen = true;
+        if (typeof next.settings.autoSaveLayout !== 'boolean') next.settings.autoSaveLayout = true;
+        if (typeof next.settings.maxHistoryCount !== 'number') next.settings.maxHistoryCount = 5000;
+        if (typeof next.settings.separateBatches !== 'boolean') next.settings.separateBatches = true;
+        if (typeof next.settings.autoSwapToLatest !== 'boolean') next.settings.autoSwapToLatest = true;
+        if (typeof next.settings.playCompletionSound !== 'boolean') next.settings.playCompletionSound = true;
+        if (!Object.prototype.hasOwnProperty.call(next.settings, 'completionSoundData')) next.settings.completionSoundData = null;
+        if (typeof next.settings.saveBeforeAfterADetailer !== 'boolean') next.settings.saveBeforeAfterADetailer = false;
+        if (typeof next.settings.autoCivitaiScan !== 'boolean') next.settings.autoCivitaiScan = true;
+        if (typeof next.settings.galleryPageSize !== 'number') next.settings.galleryPageSize = 24;
+        if (typeof next.settings.galleryGroupByQueue !== 'boolean') next.settings.galleryGroupByQueue = false;
+        if (!next.settings.panelViewModes || typeof next.settings.panelViewModes !== 'object') next.settings.panelViewModes = {};
+        next.settings.panelViewModes = { extraNetworks: 'cards', history: 'cards', gallery: 'cards', ...(next.settings.panelViewModes || {}) };
         if (typeof next.settings.fontScale !== 'number') next.settings.fontScale = 100;
         if (typeof next.settings.autoApplyModelPreset !== 'boolean') next.settings.autoApplyModelPreset = false;
+        if (typeof next.settings.showPromptSelectionToolbar !== 'boolean') next.settings.showPromptSelectionToolbar = true;
+        if (typeof next.settings.promptSyntaxQuickInsert !== 'boolean') next.settings.promptSyntaxQuickInsert = true;
+        if (typeof next.settings.doubleClickEditPromptPills !== 'boolean') next.settings.doubleClickEditPromptPills = true;
+        const savedTextEncoders = Array.isArray(next.textEncodersList) ? next.textEncodersList.map((value: unknown) => String(value)) : [];
+        next.textEncodersList = Array.from(new Set(['Automatic', 'None', 'qwen_3_06b_base.safetensors', 'qwen35_4b.safetensors', ...savedTextEncoders]));
         if (next.settings.uiTheme === 'cyber_black' || next.settings.uiTheme == null) {
           next.settings.uiTheme = 'obsidian';
         } else if (next.settings.uiTheme === 'classic') {
           next.settings.uiTheme = 'paper';
         }
+        if (next.settings.gallerySource === 'app') next.settings.gallerySource = 'session';
+        if (next.settings.gallerySource === 'all') next.settings.gallerySource = 'outputs';
+        if (typeof next.settings.saveGeneratedImagesToProject !== 'boolean') next.settings.saveGeneratedImagesToProject = false;
+        if (typeof next.settings.localProjectPath !== 'string') next.settings.localProjectPath = '';
+        if (typeof next.settings.projectJpegQuality !== 'number') next.settings.projectJpegQuality = 92;
+        if (typeof next.settings.projectJpegMaxDimension !== 'number') next.settings.projectJpegMaxDimension = 2048;
+        if (next.settings.projectJpegBackground !== 'black' && next.settings.projectJpegBackground !== 'white') next.settings.projectJpegBackground = 'black';
+        if (typeof next.settings.projectJpegFilenamePrefix !== 'string') next.settings.projectJpegFilenamePrefix = 'SwarmCanvas';
+        if (!['jpg', 'jpeg', 'png', 'webp'].includes(next.settings.projectImageFormat)) next.settings.projectImageFormat = 'jpg';
+        if (typeof next.settings.outputFolderPath !== 'string') next.settings.outputFolderPath = '';
+        // Gallery always starts in Current Session on a new app launch. Users can still
+        // switch to Local Project or All Outputs for the duration of the current run.
+        next.settings.gallerySource = 'session';
         return next;
       },
       partialize: (state) => ({
@@ -1493,7 +1976,6 @@ export const useAppStore = create<AppState>()(
         aDetailerUnits: state.aDetailerUnits,
         controlNetUnits: (state.controlNetUnits || []).map((unit) => ({ ...unit, image: unit.image && !unit.image.startsWith('data:') ? unit.image : undefined })),
         settings: state.settings,
-        sessionStartTime: state.sessionStartTime,
         emptyBatches: state.emptyBatches,
         promptPresets: state.promptPresets || [],
         lastFailedJob: state.lastFailedJob,
@@ -1509,14 +1991,19 @@ export const useAppStore = create<AppState>()(
         history: (state.history || [])
           .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
           .slice(0, 50),
-        galleryHistory: (state.galleryHistory || [])
-          .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
-          .slice(0, 100),
+        // Server gallery is reloaded from SwarmUI when the All Server source is opened.
+        // Do not persist the old 100-item server snapshot as though it were the complete
+        // server history; SwarmUI's ListImages endpoint is itself server-limited per request.
+        galleryHistory: [],
       }),
       onRehydrateStorage: () => (state) => {
         // Runs once, right after the persisted queue is loaded back in - captures how many
         // jobs survived a crash/refresh so the UI can offer to resume them exactly once,
         // without re-triggering every time the queue changes during normal use afterward.
+        if (state) {
+          // Gallery is intentionally session-first on every application launch.
+          state.settings.gallerySource = 'session';
+        }
         if (state && state.queue && state.queue.length > 0) {
           state.recoveredQueueSize = state.queue.length;
         }

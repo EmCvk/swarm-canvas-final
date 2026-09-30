@@ -1,12 +1,28 @@
 import React, { useState } from 'react';
 import { Activity, Film, Image as ImageIcon } from 'lucide-react';
-import { Workspace } from './components/Workspace';
+import { Workspace, PromptPillsPanel } from './components/Workspace';
+import { TagImageBrowserPanel } from './components/TagImageBrowserPanel';
 import { AnimationLab } from './components/AnimationLab';
 
 type AppTab = 'canvas' | 'animation';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AppTab>('canvas');
+  const popup = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('popup') : null;
+  if (popup === 'prompt-pills') {
+    return (
+      <div className="w-screen h-screen overflow-hidden bg-[#07080b]">
+        <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />
+      </div>
+    );
+  }
+  if (popup === 'tag-image-browser') {
+    return (
+      <div className="w-screen h-screen overflow-hidden bg-[#07080b]">
+        <TagImageBrowserPanel />
+      </div>
+    );
+  }
 
   return (
     <div className="sc-app-shell w-screen h-screen overflow-hidden flex flex-col">

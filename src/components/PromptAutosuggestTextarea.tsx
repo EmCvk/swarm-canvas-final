@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { danbooru } from '../api/danbooruService';
-import { parseWeightedToken, formatWeightedToken, isLoraToken, loraDisplayName } from '../utils/promptWeights';
+import { parseWeightedToken, formatWeightedToken, isLoraToken, loraDisplayName, splitPromptTokens } from '../utils/promptWeights';
 import {
   X,
   Plus,
@@ -46,8 +46,8 @@ function parsePromptStringToPills(promptStr: string): ParsedPill[] {
   if (!promptStr || !promptStr.trim()) return [];
 
   const rawTokens = promptStr
-    .split(',')
-    .map((s) => s.trim())
+    .split('\n')
+    .flatMap(splitPromptTokens)
     .filter(Boolean);
 
   return rawTokens.map((token, index) => {
@@ -142,6 +142,9 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const pills = useMemo(() => parsePromptStringToPills(value), [value]);
+  const loraPills = useMemo(() => pills
+    .map((pill, index) => ({ pill, index }))
+    .filter(({ pill }) => pill.category === 'lora' && isLoraToken(pill.text) && pill.enabled !== false), [pills]);
 
   const updatePills = (newPills: ParsedPill[]) => {
     onChange(serializePillsToPrompt(newPills));
@@ -273,6 +276,10 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
   const startEditPill = (index: number) => {
     setEditingIndex(index);
     const p = pills[index];
+    if (p.category === 'lora' && isLoraToken(p.text)) {
+      setEditingText(formatWeightedToken(parseWeightedToken(p.text), p.weight));
+      return;
+    }
     setEditingText(p.weight !== 1.0 ? `(${p.text}:${p.weight})` : p.text);
   };
 
@@ -374,6 +381,28 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
         </div>
       </div>
 
+      {loraPills.length > 0 && !isRawMode && (
+        <div className="shrink-0 flex items-center gap-1.5 px-2 py-1.5 border-b border-white/5 overflow-x-auto" aria-label="Active LoRAs">
+          <span className="shrink-0 text-[9px] font-mono uppercase tracking-wider text-fuchsia-300/80">LoRA</span>
+          {loraPills.map(({ pill, index }) => {
+            const parsed = parseWeightedToken(pill.text);
+            return (
+              <button
+                key={pill.id}
+                type="button"
+                className="shrink-0 max-w-52 inline-flex items-center gap-1 rounded-md bg-fuchsia-500/10 border border-fuchsia-500/20 px-1.5 py-0.5 text-[9px] font-mono text-fuchsia-200 hover:bg-fuchsia-500/15"
+                title="Wheel to change LoRA weight; double-click to edit"
+                onWheel={(event) => handlePillWheel(event, index)}
+                onDoubleClick={() => startEditPill(index)}
+              >
+                <span className="truncate">{loraDisplayName(parsed.loraName || pill.text)}</span>
+                <span className="text-fuchsia-300">×{pill.weight.toFixed(2)}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {isRawMode ? (
         <textarea
           value={value}
@@ -384,7 +413,14 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
       ) : (
         <div
           className="flex-1 overflow-auto p-1.5 flex flex-wrap content-start items-center gap-1 cursor-text"
-          onClick={() => inputRef.current?.focus()}
+          onClick={(event) => {
+            // Only clicks on genuinely empty prompt-box space should move focus to
+            // the tag-entry input. Interactive pills (especially the edit input)
+            // must keep their own focus/selection behavior.
+            if (event.target === event.currentTarget) {
+              inputRef.current?.focus();
+            }
+          }}
         >
           {pills.map((pill, index) => {
             const styles = CATEGORY_STYLES[pill.category] || CATEGORY_STYLES.general;
@@ -398,12 +434,28 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                   type="text"
                   value={editingText}
                   onChange={(e) => setEditingText(e.target.value)}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => {
+                    // Keep the browser's native double-click word selection.
+                    // Do not let the prompt-box click handler steal focus, which
+                    // previously ended edit mode on the second click.
+                    e.stopPropagation();
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') finishEditPill(index);
-                    if (e.key === 'Escape') setEditingIndex(null);
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      finishEditPill(index);
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setEditingIndex(null);
+                      setEditingText('');
+                    }
                   }}
                   onBlur={() => finishEditPill(index)}
-                  className="px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none w-28 font-mono"
+                  className="px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none w-28 font-mono select-text"
                 />
               );
             }
@@ -411,7 +463,7 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
             return (
               <div
                 key={pill.id}
-                draggable
+                draggable={!isEditing}
                 onDragStart={() => handleDragStart(index)}
                 onDragOver={(e) => handleDragOver(e, index)}
                 onDragEnd={() => setDraggedIndex(null)}

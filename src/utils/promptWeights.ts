@@ -79,10 +79,81 @@ export function clampWeight(weight: number, min = 0.1, max = 3.0): number {
 export function extractPromptLoras(prompt: string): ParsedWeightedToken[] {
   if (!prompt) return [];
   return prompt
-    .split(',')
-    .map((t) => t.trim())
+    .split('\n')
+    .flatMap(splitPromptTokens)
     .filter(Boolean)
     .filter((t) => !(t.startsWith('/*') && t.endsWith('*/')))
     .filter((t) => isLoraToken(t))
     .map((t) => parseWeightedToken(t));
+}
+
+/**
+ * Splits one prompt line into top-level comma-delimited tokens without breaking
+ * nested prompt syntax such as `<random:red, blue>`, `(red, blue:1.2)`, or
+ * `<param[cfgscale]:<random:5,7>>`. This keeps advanced SwarmUI syntax intact
+ * inside the pill editor instead of turning inner commas into separate pills.
+ */
+export function splitPromptTokens(line: string): string[] {
+  if (!line) return [];
+  const out: string[] = [];
+  let current = '';
+  let roundDepth = 0;
+  let squareDepth = 0;
+  let curlyDepth = 0;
+  let angleDepth = 0;
+  let inBlockComment = false;
+  let escaped = false;
+
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index];
+    const next = line[index + 1];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      current += char;
+      escaped = true;
+      continue;
+    }
+
+    if (inBlockComment) {
+      current += char;
+      if (char === '*' && next === '/') {
+        current += next;
+        index++;
+        inBlockComment = false;
+      }
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      current += '/*';
+      index++;
+      inBlockComment = true;
+      continue;
+    }
+
+    if (char === '(') roundDepth++;
+    else if (char === ')' && roundDepth > 0) roundDepth--;
+    else if (char === '[') squareDepth++;
+    else if (char === ']' && squareDepth > 0) squareDepth--;
+    else if (char === '{') curlyDepth++;
+    else if (char === '}' && curlyDepth > 0) curlyDepth--;
+    else if (char === '<') angleDepth++;
+    else if (char === '>' && angleDepth > 0) angleDepth--;
+
+    if (char === ',' && roundDepth === 0 && squareDepth === 0 && curlyDepth === 0 && angleDepth === 0) {
+      const token = current.trim();
+      if (token) out.push(token);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  const finalToken = current.trim();
+  if (finalToken) out.push(finalToken);
+  return out;
 }

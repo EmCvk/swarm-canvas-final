@@ -67,8 +67,12 @@ const levelMeta: Record<
 function formatDetails(details: unknown) {
   if (details === undefined) return '';
   if (typeof details === 'string') return details;
+  if (details instanceof Error) {
+    return `${details.name}: ${details.message}${details.stack ? `\n${details.stack}` : ''}`;
+  }
   try {
-    return JSON.stringify(details, null, 2);
+    const serialized = JSON.stringify(details, Object.getOwnPropertyNames(details as object), 2);
+    return serialized && serialized !== '{}' ? serialized : String(details);
   } catch {
     return String(details);
   }
@@ -121,8 +125,12 @@ export const DebugConsole: React.FC<{
       const message = args
         .map((value) => {
           if (typeof value === 'string') return value;
+          if (value instanceof Error) {
+            return `${value.name}: ${value.message}${value.stack ? `\n${value.stack}` : ''}`;
+          }
           try {
-            return JSON.stringify(value);
+            const serialized = JSON.stringify(value, Object.getOwnPropertyNames(value as object));
+            return serialized && serialized !== '{}' ? serialized : String(value);
           } catch {
             return String(value);
           }

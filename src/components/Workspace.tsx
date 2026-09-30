@@ -17,7 +17,7 @@ import { TagRarityInspector } from './companions/TagRarityInspector';
 
 
 import * as React from 'react';
-import { useEffect, useState, useRef, useMemo, useDeferredValue } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback, useDeferredValue } from 'react';
 
 import { useShallow } from 'zustand/react/shallow';
 
@@ -68,10 +68,14 @@ import { civitaiService } from '../api/civitaiService';
 import { CivitaiLibraryPanel } from './CivitaiLibraryPanel';
 import { InfoPopover } from './InfoPopover';
 import { StudioToolsPanel } from './StudioToolsPanel';
+import { TagImageBrowserPanel } from './TagImageBrowserPanel';
+import { GenerationViewerPanel } from './GenerationViewerPanel';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 import { swarmClient, emitDiagnostic } from '../api/swarmClient';
+import { chooseLocalProjectLocation, getLocalProjectLocation } from '../api/projectStorage';
 
-import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken, extractPromptLoras } from '../utils/promptWeights';
+import { parseWeightedToken, formatWeightedToken, loraDisplayName, isLoraToken, extractPromptLoras, splitPromptTokens } from '../utils/promptWeights';
 
 import { matchesGenerationQuery, parseActiveFieldTerm, applyFieldSuggestion } from '../utils/historySearch';
 
@@ -79,7 +83,7 @@ import { emitToast } from '../utils/toast';
 
 import {
 
-  Wand2, Plus, Clock, Gauge, Command as CommandIcon, ArrowDownUp,
+  Wand2, Plus, Minus, Clock, Gauge, Command as CommandIcon, ArrowDownUp,
 
   RotateCw, Search, Layers, Sparkle, LayoutGrid, RefreshCw,
 
@@ -95,13 +99,49 @@ import {
 
   Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff, Terminal,
 
-  Star, Info, Volume2, Play, Sparkles, Crop, Type, Move, GripVertical,
+  Star, Info, Play, Sparkles, Crop, Type, Move, GripVertical,
 
-  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X, Keyboard, GitBranch, Network
+  BookOpen, BarChart3, Pause, Palette, PanelLeftClose, PanelLeftOpen,Bookmark, X, Keyboard, GitBranch, Network, FolderOpen
 
 } from 'lucide-react';
 
 
+
+const openPromptPillsPopup = async () => {
+  if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
+    emitToast('Prompt Pills popup is available in the Tauri desktop app.', 'warning');
+    return;
+  }
+  try {
+    const label = `prompt-pills-${Date.now()}`;
+    const popup = new WebviewWindow(label, {
+      url: '/?popup=prompt-pills',
+      title: 'SwarmCanvas — Prompt Pills',
+      width: 1180,
+      height: 760,
+      minWidth: 720,
+      minHeight: 480,
+      resizable: true,
+      center: true,
+    });
+    void popup.once('tauri://error', (event) => {
+      console.error('[Workspace] Prompt Pills popup error:', event);
+      emitToast('Prompt Pills popup failed to open: ' + (typeof event === 'object' ? JSON.stringify(event) : String(event)), 'error');
+    });
+  } catch (error) {
+    console.error('[Workspace] Could not open Prompt Pills popup:', error);
+    emitToast(`Could not open Prompt Pills popup: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  }
+};
+
+const requestGenerationViewer = (item: HistoryItem) => {
+  useAppStore.getState().setGenerationViewerItem(item);
+  try {
+    window.dispatchEvent(new CustomEvent('swarm-open-generation-viewer'));
+  } catch {
+    // The store selection remains available even without DOM event dispatch.
+  }
+};
 
 /* =========================================================================
 
@@ -653,8 +693,9 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
     if (isGenerating && currentStep <= 1) setScrubFrameIndex(null);
   }, [isGenerating, currentStep]);
 
-  const queuePosition = activeJob ? queue.length + 1 : 0;
-  const totalRemainingJobs = queue.length + (activeJob ? 1 : 0);
+  const queuedJobsCount = queue.filter((job) => job.status === 'queued').length;
+  const queuePosition = activeJob ? queuedJobsCount + 1 : 0;
+  const totalRemainingJobs = queuedJobsCount + (activeJob ? 1 : 0);
 
 
 
@@ -1079,7 +1120,8 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  const totalInQueue = queue.length + (isGenerating || activeJob ? 1 : 0);
+  const queuedCount = queue.filter((item: any) => item.status === 'queued').length;
+  const totalInQueue = queuedCount + (isGenerating || activeJob ? 1 : 0);
 
 
 
@@ -1138,12 +1180,12 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
       className="sc-themed-viewport h-full w-full relative flex flex-col items-center justify-center overflow-hidden select-none"
 
       onWheel={(e) => {
-        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *, .sc-live-monitor, .sc-live-monitor *')) return;
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
         handleWheel(e);
       }}
 
       onMouseDown={(e) => {
-        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *, .sc-live-monitor, .sc-live-monitor *')) return;
+        if ((e.target as HTMLElement).closest('.sc-queue-hub, .sc-queue-hub *')) return;
         handleMouseDown(e);
       }}
 
@@ -1205,160 +1247,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-            {/* Live Generation Monitor */}
-
-            {(isGenerating || (scrubFrameIndex !== null && previewHistory.length > 0)) && viewportMode === 'live' && (
-
-              <div className="sc-live-monitor absolute top-3 left-3 right-3 max-w-sm flex flex-col gap-1.5 bg-black/85 backdrop-blur-md px-3 py-2.5 rounded-xl text-emerald-200 font-mono text-[10px] shadow-lg">
-
-                <div className="flex items-center justify-between gap-2">
-
-                  <div className="flex items-center gap-2 min-w-0">
-
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${isGenerating ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-
-                    <span className="font-semibold truncate">
-
-                      {scrubFrameIndex !== null ? `PREVIEW FRAME ${scrubFrameIndex + 1} / ${previewHistory.length}` : (livePreview ? 'LIVE PREVIEW' : (metrics.stage || 'PREPARING'))}
-
-                    </span>
-
-                  </div>
-
-                  {isGenerating && (
-
-                    <button
-
-                      type="button"
-
-                      onClick={(e) => { e.stopPropagation(); cancelGeneration(); }}
-
-                      className="shrink-0 px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-700/60 text-rose-300 hover:bg-rose-900/60 transition cursor-pointer"
-
-                      title="Cancel current generation"
-
-                    >
-
-                      Cancel
-
-                    </button>
-
-                  )}
-
-                </div>
-
-
-
-                <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
-
-                  <div
-
-                    className="h-full bg-emerald-400 transition-[width] duration-150 ease-out"
-
-                    style={{ width: `${Math.max(2, progressPercent)}%` }}
-
-                  />
-
-                </div>
-
-
-
-                <div className="flex items-center justify-between text-zinc-400 flex-wrap gap-x-2">
-
-                  <span>Step {currentStep} / {maxSteps} · {progressPercent}%</span>
-
-                  {metrics.speed !== null && <span>{metrics.speed} it/s</span>}
-
-                  {metrics.eta !== null && isGenerating && <span>ETA {metrics.eta}s</span>}
-
-                  {isGenerating && <span>Elapsed {(monitorElapsedMs / 1000).toFixed(1)}s</span>}
-
-                </div>
-
-
-
-                {(totalRemainingJobs > 1 || isQueuePaused) && (
-
-                  <div className="flex items-center justify-between text-zinc-500 border-t border-white/10 pt-1.5 mt-0.5">
-
-                    <span>{queuePosition > 0 ? `Job ${queuePosition} of ${totalRemainingJobs} in queue` : `${totalRemainingJobs} job(s) queued`}</span>
-
-                    <button
-
-                      type="button"
-
-                      onClick={(e) => { e.stopPropagation(); setIsQueuePaused(!isQueuePaused); }}
-
-                      className={`px-1.5 py-0.5 rounded border transition cursor-pointer ${isQueuePaused ? 'bg-amber-950/50 border-amber-600/50 text-amber-300' : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'}`}
-
-                      title={isQueuePaused ? 'Resume queue after this job' : 'Pause queue after this job'}
-
-                    >
-
-                      {isQueuePaused ? 'Resume after this' : 'Pause after this'}
-
-                    </button>
-
-                  </div>
-
-                )}
-
-
-
-                {previewHistory.length > 1 && (
-
-                  <div className="flex items-center gap-1 overflow-x-auto pt-1 border-t border-white/10 mt-0.5">
-
-                    {previewHistory.map((frame, idx) => (
-
-                      <button
-
-                        key={idx}
-
-                        type="button"
-
-                        onClick={(e) => { e.stopPropagation(); setScrubFrameIndex(idx === scrubFrameIndex ? null : idx); }}
-
-                        className={`shrink-0 w-8 h-8 rounded overflow-hidden border-2 transition ${scrubFrameIndex === idx ? 'border-emerald-400' : 'border-transparent opacity-60 hover:opacity-100'}`}
-
-                        title={`Frame ${idx + 1}`}
-
-                      >
-
-                        <img src={frame} className="w-full h-full object-cover" />
-
-                      </button>
-
-                    ))}
-
-                    {scrubFrameIndex !== null && (
-
-                      <button
-
-                        type="button"
-
-                        onClick={(e) => { e.stopPropagation(); setScrubFrameIndex(null); }}
-
-                        className="shrink-0 ml-1 px-1.5 py-1 rounded bg-emerald-950/50 border border-emerald-600/50 text-emerald-300 hover:bg-emerald-900/50 transition"
-
-                        title="Back to live"
-
-                      >
-
-                        Live
-
-                      </button>
-
-                    )}
-
-                  </div>
-
-                )}
-
-              </div>
-
-            )}
-
+            {/* Generation status is shown in the bottom progress monitor. */}
 
 
             {isComparing && comparisonImage && (
@@ -1867,7 +1756,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-              {queue.length > 0 && !isGenerating && (
+              {queuedCount > 0 && !isGenerating && (
                 <>
                 <InfoPopover content="Starts the jobs already in the queue without adding another copy of the current prompt." side="bottom" className="sc-popover-button-trigger">
                   <button
@@ -2261,9 +2150,9 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                                 </span>
                               )}
 
-                              <span className={`sc-queue-node ${item.isRunning ? 'sc-queue-node-running' : ''}`}>
+                              <span className={`sc-queue-node ${item.isRunning ? 'sc-queue-node-running' : item.status === 'failed' ? 'sc-queue-node-failed' : item.status === 'canceled' ? 'sc-queue-node-canceled' : ''}`}>
 
-                                {item.isRunning ? '●' : `#${globalIndex !== -1 ? globalIndex + 1 : itemIdx + 1}`}
+                                {item.isRunning ? '●' : item.status === 'failed' ? '!' : item.status === 'canceled' ? '×' : `#${globalIndex !== -1 ? globalIndex + 1 : itemIdx + 1}`}
 
                               </span>
 
@@ -2274,6 +2163,12 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                                   {item.prompt}
 
                                 </span>
+
+                                {item.status && item.status !== 'queued' && !item.isRunning && (
+                                  <span className={`w-fit px-1.5 py-0.5 rounded text-[8px] font-mono font-bold uppercase ${item.status === 'failed' ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20' : 'bg-zinc-500/10 text-zinc-400 border border-zinc-500/15'}`}>
+                                    {item.status}
+                                  </span>
+                                )}
 
                                 <div className="flex items-center gap-1 flex-wrap">
 
@@ -2489,56 +2384,46 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-      {/* Analytics Progress Bar */}
-
+      {/* Generation Progress / Monitor */}
       {(isGenerating || metrics.totalTime > 0) && !settings.hideProgressBar && (
-
-        <div className="absolute bottom-20 left-4 right-4 bg-[#121418]/95 border border-[#2b2f3a] p-3 rounded-lg shadow-2xl backdrop-blur-md z-20">
-
-          <div className="flex flex-wrap items-center justify-between text-xs text-gray-300 mb-2 gap-2">
-
-            <div className="flex items-center gap-2 font-mono">
-
-              <span className="bg-indigo-600/30 text-indigo-300 px-2 py-0.5 rounded text-[11px] font-semibold border border-indigo-500/30">
-
-                {metrics.stage}
-
+        <div className="absolute bottom-20 left-4 right-4 bg-[#121418]/96 border border-[#2b2f3a] p-3 rounded-lg shadow-2xl backdrop-blur-md z-20">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${isGenerating ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              <span className="bg-indigo-600/25 text-indigo-300 px-2 py-0.5 rounded text-[11px] font-semibold border border-indigo-500/25 truncate max-w-[260px]">
+                {metrics.stage || 'Ready'}
               </span>
-
-              <span>{currentStep} / {maxSteps} steps ({progressPercent}%)</span>
-
+              <span className="text-[10px] font-mono text-zinc-500">Step {currentStep} / {maxSteps}</span>
+              <span className="text-[10px] font-mono text-zinc-400">{progressPercent}%</span>
+              {isGenerating && <span className="text-[10px] font-mono text-zinc-600">Elapsed {(monitorElapsedMs / 1000).toFixed(1)}s</span>}
             </div>
 
-
-
-            <div className="flex items-center gap-3 text-[11px] text-gray-400 font-mono">
-
-              {metrics.speed !== null && (
-
-                <span className="flex items-center gap-1"><Gauge className="w-3.5 h-3.5 text-amber-400" /> {metrics.speed} it/s</span>
-
-              )}
-
-              {metrics.eta !== null && isGenerating && (
-
-                <span className="flex items-center gap-1 text-indigo-400 font-semibold"><Clock className="w-3.5 h-3.5" /> ETA: ~{metrics.eta}s</span>
-
-              )}
-
-              <span className="flex items-center gap-1 text-gray-200 font-medium">Total: {metrics.totalTime}s</span>
-
+            <div className="flex items-center gap-2 text-[10px] text-gray-400 font-mono">
+              {metrics.speed !== null && <span className="flex items-center gap-1"><Gauge className="w-3.5 h-3.5 text-amber-400" />{metrics.speed} it/s</span>}
+              {metrics.eta !== null && isGenerating && <span className="flex items-center gap-1 text-indigo-300 font-semibold"><Clock className="w-3.5 h-3.5" />ETA ~{metrics.eta}s</span>}
+              <span className="text-zinc-300">Total {metrics.totalTime}s</span>
+              {queuePosition > 0 && <span className="text-zinc-500">Job {queuePosition}/{totalRemainingJobs}</span>}
+              {isGenerating && <button type="button" onClick={cancelGeneration} className="px-2 py-1 rounded-md bg-rose-950/50 border border-rose-700/50 text-rose-300 hover:bg-rose-900/60 cursor-pointer">Cancel</button>}
+              {(totalRemainingJobs > 1 || isQueuePaused) && <button type="button" onClick={() => setIsQueuePaused(!isQueuePaused)} className="px-2 py-1 rounded-md bg-white/5 border border-white/10 text-zinc-400 hover:text-white cursor-pointer">{isQueuePaused ? 'Resume queue' : 'Pause queue'}</button>}
             </div>
-
           </div>
 
           <div className="w-full bg-[#1a1d24] h-2 rounded-full overflow-hidden border border-neutral-800">
-
             <div className="bg-blue-500/70 h-full transition-all duration-100 ease-out" style={{ width: `${progressPercent}%` }} />
-
           </div>
 
+          {previewHistory.length > 1 && viewportMode === 'live' && (
+            <div className="mt-2 flex items-center gap-1.5 overflow-x-auto">
+              <span className="text-[9px] uppercase tracking-wider text-zinc-600 shrink-0">Preview</span>
+              {previewHistory.map((frame, idx) => (
+                <button key={idx} type="button" onClick={() => setScrubFrameIndex(idx === scrubFrameIndex ? null : idx)} className={`w-8 h-8 shrink-0 rounded overflow-hidden border-2 transition cursor-pointer ${scrubFrameIndex === idx ? 'border-emerald-400' : 'border-transparent opacity-60 hover:opacity-100'}`} title={`Preview frame ${idx + 1}`}>
+                  <img src={frame} alt={`Preview frame ${idx + 1}`} className="w-full h-full object-cover" />
+                </button>
+              ))}
+              {scrubFrameIndex !== null && <button type="button" onClick={() => setScrubFrameIndex(null)} className="px-2 py-1 rounded bg-emerald-950/50 border border-emerald-600/50 text-[9px] text-emerald-300 cursor-pointer">Live</button>}
+            </div>
+          )}
         </div>
-
       )}
 
     </div>
@@ -2555,7 +2440,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
    ========================================================================= */
 
-const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
+export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const {
     prompt, negativePrompt, setPrompt, setNegativePrompt, activeMacroCategory, activeSubCategory, pillSearchQuery,
@@ -2603,6 +2488,17 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
   const [scrollWeightEnabled, setScrollWeightEnabled] = useState(true);
+
+  // Prompt sections are newline-delimited. They are UI-only structure: the generated
+  // prompt string remains unchanged, so existing workflows and metadata stay compatible.
+  const [focusedPromptSection, setFocusedPromptSection] = useState<Record<'positive' | 'negative', number | null>>({
+    positive: null,
+    negative: null,
+  });
+  const [collapsedPromptSections, setCollapsedPromptSections] = useState<Record<'positive' | 'negative', number[]>>({
+    positive: [],
+    negative: [],
+  });
 
 
 
@@ -2658,6 +2554,21 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [loraPresetMenuTarget, setLoraPresetMenuTarget] = useState<'positive' | 'negative' | null>(null);
 
+  type PromptSectionPreset = { id: string; name: string; text: string; target: 'positive' | 'negative'; savedAt: number };
+
+  const loadPromptSectionPresets = (): PromptSectionPreset[] => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('swarm_prompt_section_presets_v1') || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  };
+
+  const [promptSectionPresets, setPromptSectionPresets] = useState<PromptSectionPreset[]>(loadPromptSectionPresets);
+
+  const [findQuery, setFindQuery] = useState('');
+  const [replaceQuery, setReplaceQuery] = useState('');
+  const [findScope, setFindScope] = useState<'active-section' | 'active-prompt' | 'both'>('active-section');
+
   const promptKitFileInputRef = useRef<HTMLInputElement>(null);
 
 
@@ -2689,6 +2600,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       exportedAt: Date.now(),
       promptSlots,
       loraPresets,
+      promptSectionPresets,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -2696,7 +2608,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     a.download = `swarm-canvas-prompt-kit-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-    emitToast(`Exported ${promptSlots.length} prompt slot(s) and ${loraPresets.length} LoRA preset(s)`, 'success');
+    emitToast(`Exported ${promptSlots.length} prompt slot(s), ${loraPresets.length} LoRA preset(s), and ${promptSectionPresets.length} section preset(s)`, 'success');
   };
 
   /** Merges an exported prompt kit back in. Slots/presets are matched by id/name so
@@ -2708,6 +2620,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         const data = JSON.parse(String(reader.result));
         const importedSlots: PromptSlot[] = Array.isArray(data.promptSlots) ? data.promptSlots : [];
         const importedPresets: LoraPreset[] = Array.isArray(data.loraPresets) ? data.loraPresets : [];
+        const importedSectionPresets: PromptSectionPreset[] = Array.isArray(data.promptSectionPresets) ? data.promptSectionPresets : [];
 
         if (importedSlots.length > 0) {
           setPromptSlots((prev) => {
@@ -2724,10 +2637,18 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           });
         }
 
-        if (importedSlots.length === 0 && importedPresets.length === 0) {
-          emitToast('That file has no prompt slots or LoRA presets to import', 'warning');
+        if (importedSectionPresets.length > 0) {
+          setPromptSectionPresets((prev) => {
+            const byName = new Map(prev.map((p) => [`${p.target}:${p.name}`, p]));
+            importedSectionPresets.forEach((p) => byName.set(`${p.target}:${p.name}`, p));
+            return Array.from(byName.values()).slice(0, 100);
+          });
+        }
+
+        if (importedSlots.length === 0 && importedPresets.length === 0 && importedSectionPresets.length === 0) {
+          emitToast('That file has no prompt slots, LoRA presets, or section presets to import', 'warning');
         } else {
-          emitToast(`Imported ${importedSlots.length} prompt slot(s) and ${importedPresets.length} LoRA preset(s)`, 'success');
+          emitToast(`Imported ${importedSlots.length} prompt slot(s), ${importedPresets.length} LoRA preset(s), and ${importedSectionPresets.length} section preset(s)`, 'success');
         }
       } catch {
         emitToast('Could not read that file - is it a valid prompt kit export?', 'error');
@@ -2736,7 +2657,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     reader.readAsText(file);
   };
 
-  const [promptToolsOpen, setPromptToolsOpen] = useState<'slots' | 'history' | 'cleanup' | 'diff' | null>(null);
+  const [promptToolsOpen, setPromptToolsOpen] = useState<'slots' | 'history' | 'cleanup' | 'diff' | 'sections' | 'find' | 'syntax' | null>(null);
 
   const [selectedPromptHistoryId, setSelectedPromptHistoryId] = useState<string | null>(null);
 
@@ -2767,6 +2688,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     try { localStorage.setItem('swarm_lora_presets_v1', JSON.stringify(loraPresets)); } catch {}
 
   }, [loraPresets]);
+
+  useEffect(() => {
+    try { localStorage.setItem('swarm_prompt_section_presets_v1', JSON.stringify(promptSectionPresets.slice(0, 100))); } catch {}
+  }, [promptSectionPresets]);
 
 
 
@@ -2822,7 +2747,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  const promptTokensForDiff = (text: string) => new Set(text.split(/[\n,]+/).map((t) => t.trim().toLowerCase()).filter(Boolean));
+  const promptTokensForDiff = (text: string) => new Set(text.split('\n').flatMap(splitPromptTokens).map((t) => t.trim().toLowerCase()).filter(Boolean));
 
 
 
@@ -2905,10 +2830,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
   const [isTagBrowserCollapsed, setIsTagBrowserCollapsed] = useState(false);
+  const [showPromptLayoutControls, setShowPromptLayoutControls] = useState<boolean>(() => localStorage.getItem('swarm_prompt_layout_controls_visible_v1') !== '0');
+  const [showPromptToolsBar, setShowPromptToolsBar] = useState<boolean>(() => localStorage.getItem('swarm_prompt_tools_bar_visible_v1') !== '0');
 
   const [editingIndex, setEditingIndex] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
 
   const [editingText, setEditingText] = useState('');
+  useEffect(() => { localStorage.setItem('swarm_prompt_layout_controls_visible_v1', showPromptLayoutControls ? '1' : '0'); }, [showPromptLayoutControls]);
+  useEffect(() => { localStorage.setItem('swarm_prompt_tools_bar_visible_v1', showPromptToolsBar ? '1' : '0'); }, [showPromptToolsBar]);
 
   // Tracks the pill currently being drag-reordered. This must be a ref, not state: `dragover`
   // fires many times per second while dragging, faster than React can guarantee a re-render
@@ -3252,13 +3181,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     lines.forEach((line, lineIdx) => {
 
-      const lineTokens = line
-
-        .split(',')
-
-        .map((t) => t.trim())
-
-        .filter(Boolean);
+      const lineTokens = splitPromptTokens(line);
 
 
 
@@ -3302,13 +3225,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     lines.forEach((line, lineIdx) => {
 
-      const lineTokens = line
-
-        .split(',')
-
-        .map((t) => t.trim())
-
-        .filter(Boolean);
+      const lineTokens = splitPromptTokens(line);
 
 
 
@@ -3959,63 +3876,15 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         items: [
 
           {
-
             label: `Increase Weight All (+${stepIncrement.toFixed(2)})`,
-
             icon: <ChevronUp className="w-3.5 h-3.5 text-cyan-400" />,
-
-            action: () => {
-
-              indices.forEach((i) => {
-
-                const tok = tokens[i];
-
-                if (tok === '\n' || tok === 'BREAK') return;
-
-                const match = tok.match(/^\((.*):([0-9.]+)\)$/);
-
-                tokens[i] = match
-
-                  ? `(${match[1]}:${(parseFloat(match[2]) + stepIncrement).toFixed(2)})`
-
-                  : `(${tok}:${(1.0 + stepIncrement).toFixed(2)})`;
-
-              });
-
-              setPromptTokens(target, tokens);
-
-            }
-
+            action: () => adjustSelectedPromptWeights(target, stepIncrement),
           },
 
           {
-
             label: `Decrease Weight All (-${stepIncrement.toFixed(2)})`,
-
             icon: <ChevronDown className="w-3.5 h-3.5 text-amber-400" />,
-
-            action: () => {
-
-              indices.forEach((i) => {
-
-                const tok = tokens[i];
-
-                if (tok === '\n' || tok === 'BREAK') return;
-
-                const match = tok.match(/^\((.*):([0-9.]+)\)$/);
-
-                tokens[i] = match
-
-                  ? `(${match[1]}:${Math.max(0.1, parseFloat(match[2]) - stepIncrement).toFixed(2)})`
-
-                  : `(${tok}:${Math.max(0.1, 1.0 - stepIncrement).toFixed(2)})`;
-
-              });
-
-              setPromptTokens(target, tokens);
-
-            }
-
+            action: () => adjustSelectedPromptWeights(target, -stepIncrement),
           },
 
           {
@@ -4704,6 +4573,543 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+  const getPromptSectionTexts = (target: 'positive' | 'negative'): string[] => {
+    const text = target === 'positive' ? prompt : negativePrompt;
+    return text === '' ? [''] : text.split('\n');
+  };
+
+  const setPromptValueWithHistory = (target: 'positive' | 'negative', nextValue: string) => {
+    const currentValue = target === 'positive' ? prompt : negativePrompt;
+    if (currentValue === nextValue) return;
+
+    const stack = historyStacks.current[target];
+    stack.past.push(currentValue);
+    if (stack.past.length > 50) stack.past.shift();
+    stack.future = [];
+
+    if (target === 'positive') setPrompt(nextValue);
+    else setNegativePrompt(nextValue);
+  };
+
+  const updatePromptSections = (
+    target: 'positive' | 'negative',
+    updater: (sections: string[]) => string[],
+  ) => {
+    const nextSections = updater([...getPromptSectionTexts(target)]);
+    setPromptValueWithHistory(target, nextSections.join('\n'));
+  };
+
+  const getPromptSectionSummary = (sectionText: string): string => {
+    const firstVisible = sectionText
+      .split('\n')
+      .flatMap(splitPromptTokens)
+      .filter(Boolean)
+      .find((token) => {
+        const clean = token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
+        return !isLoraToken(clean);
+      });
+    if (!firstVisible) {
+      const hasLora = sectionText.split('\n').flatMap(splitPromptTokens).some((token) => {
+        const clean = token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
+        return isLoraToken(clean);
+      });
+      return hasLora ? 'LoRA stack' : 'Empty section';
+    }
+    return firstVisible.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim().slice(0, 54);
+  };
+
+  const getPromptSectionStats = (sectionText: string) => {
+    const tokens = sectionText.split('\n').flatMap(splitPromptTokens).filter(Boolean);
+    const loraCount = tokens.filter((token) => {
+      const clean = token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
+      return isLoraToken(clean);
+    }).length;
+    return {
+      tokenCount: tokens.length,
+      loraCount,
+      charCount: sectionText.length,
+    };
+  };
+
+  const togglePromptSectionCollapsed = (target: 'positive' | 'negative', index: number) => {
+    setCollapsedPromptSections((prev) => {
+      const current = new Set(prev[target]);
+      if (current.has(index)) current.delete(index);
+      else current.add(index);
+      return { ...prev, [target]: Array.from(current).sort((a, b) => a - b) };
+    });
+  };
+
+  const focusPromptSection = (target: 'positive' | 'negative', index: number | null) => {
+    if (index === null) {
+      setFocusedPromptSection((prev) => ({ ...prev, [target]: null }));
+      return;
+    }
+    const count = getPromptSectionTexts(target).length;
+    if (index < 0 || index >= count) return;
+    setFocusedPromptSection((prev) => ({ ...prev, [target]: index }));
+    setCollapsedPromptSections((prev) => ({
+      ...prev,
+      [target]: prev[target].filter((section) => section !== index),
+    }));
+  };
+
+  const addPromptSection = (target: 'positive' | 'negative') => {
+    const sections = getPromptSectionTexts(target);
+    const active = focusedPromptSection[target];
+    const insertAt = active === null ? sections.length : Math.min(sections.length, active + 1);
+    sections.splice(insertAt, 0, '');
+    setPromptValueWithHistory(target, sections.join('\n'));
+    setFocusedPromptSection((prev) => ({ ...prev, [target]: insertAt }));
+  };
+
+  const duplicatePromptSection = (target: 'positive' | 'negative', index: number) => {
+    updatePromptSections(target, (sections) => {
+      sections.splice(index + 1, 0, sections[index] || '');
+      return sections;
+    });
+    setFocusedPromptSection((prev) => ({ ...prev, [target]: index + 1 }));
+  };
+
+  const clearPromptSection = (target: 'positive' | 'negative', index: number) => {
+    updatePromptSections(target, (sections) => {
+      if (sections.length === 1) sections[0] = '';
+      else sections[index] = '';
+      return sections;
+    });
+  };
+
+  const deletePromptSection = (target: 'positive' | 'negative', index: number) => {
+    const sections = getPromptSectionTexts(target);
+    if (sections.length <= 1) {
+      setPromptValueWithHistory(target, '');
+      setFocusedPromptSection((prev) => ({ ...prev, [target]: null }));
+      return;
+    }
+    sections.splice(index, 1);
+    setPromptValueWithHistory(target, sections.join('\n'));
+    setFocusedPromptSection((prev) => {
+      const focused = prev[target];
+      if (focused === null) return prev;
+      if (focused === index) return { ...prev, [target]: Math.min(index, sections.length - 1) };
+      if (focused > index) return { ...prev, [target]: focused - 1 };
+      return prev;
+    });
+    setCollapsedPromptSections((prev) => {
+      const shifted = prev[target]
+        .filter((section) => section !== index)
+        .map((section) => (section > index ? section - 1 : section));
+      return { ...prev, [target]: shifted };
+    });
+  };
+
+  const movePromptSection = (target: 'positive' | 'negative', index: number, direction: -1 | 1) => {
+    const sections = getPromptSectionTexts(target);
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= sections.length) return;
+
+    [sections[index], sections[nextIndex]] = [sections[nextIndex], sections[index]];
+    setPromptValueWithHistory(target, sections.join('\n'));
+
+    setFocusedPromptSection((prev) => {
+      if (prev[target] === index) return { ...prev, [target]: nextIndex };
+      if (prev[target] === nextIndex) return { ...prev, [target]: index };
+      return prev;
+    });
+
+    setCollapsedPromptSections((prev) => {
+      const current = new Set(prev[target]);
+      const a = current.has(index);
+      const b = current.has(nextIndex);
+      current.delete(index);
+      current.delete(nextIndex);
+      if (a) current.add(nextIndex);
+      if (b) current.add(index);
+      return { ...prev, [target]: Array.from(current).sort((x, y) => x - y) };
+    });
+  };
+
+  const copyPromptSection = async (target: 'positive' | 'negative', index: number) => {
+    const section = getPromptSectionTexts(target)[index] ?? '';
+    try {
+      await navigator.clipboard.writeText(section);
+      emitToast(`Copied section ${index + 1}`, 'success');
+    } catch {
+      emitToast('Could not access the clipboard', 'warning');
+    }
+  };
+
+  const pastePromptSection = async (target: 'positive' | 'negative', index: number) => {
+    try {
+      const clipboard = await navigator.clipboard.readText();
+      if (!clipboard.trim()) {
+        emitToast('Clipboard is empty', 'info');
+        return;
+      }
+      updatePromptSections(target, (sections) => {
+        sections[index] = clipboard.replace(/\r\n/g, '\n').replace(/\n/g, ', ').trim();
+        return sections;
+      });
+      emitToast(`Pasted into section ${index + 1}`, 'success');
+    } catch {
+      emitToast('Could not read the clipboard', 'warning');
+    }
+  };
+
+  const savePromptSectionPreset = (target: 'positive' | 'negative', index: number) => {
+    const text = getPromptSectionTexts(target)[index] ?? '';
+    if (!text.trim()) {
+      emitToast('Cannot save an empty section', 'warning');
+      return;
+    }
+    const name = window.prompt(`Save section ${index + 1} as:`, getPromptSectionSummary(text));
+    if (!name?.trim()) return;
+    const preset: PromptSectionPreset = {
+      id: `section-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name: name.trim(),
+      text: text.trim(),
+      target,
+      savedAt: Date.now(),
+    };
+    setPromptSectionPresets((prev) => [preset, ...prev.filter((p) => !(p.target === target && p.name.toLowerCase() === preset.name.toLowerCase()))].slice(0, 100));
+    emitToast(`Saved section preset "${preset.name}"`, 'success');
+  };
+
+  const applyPromptSectionPreset = (preset: PromptSectionPreset, target: 'positive' | 'negative') => {
+    const focused = focusedPromptSection[target];
+    const sections = getPromptSectionTexts(target);
+    if (focused !== null && focused < sections.length) {
+      sections[focused] = preset.text;
+      setPromptValueWithHistory(target, sections.join('\n'));
+    } else if (sections.length === 1 && !sections[0].trim()) {
+      sections[0] = preset.text;
+      setPromptValueWithHistory(target, sections.join('\n'));
+    } else {
+      setPromptValueWithHistory(target, [...sections, preset.text].join('\n'));
+      setFocusedPromptSection((prev) => ({ ...prev, [target]: sections.length }));
+    }
+    setPromptToolsOpen(null);
+    emitToast(`Applied section preset "${preset.name}"`, 'success');
+  };
+
+  const deletePromptSectionPreset = (id: string) => {
+    setPromptSectionPresets((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  const getSelectedPromptIndices = (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    return Array.from(selectedTokens[target]).filter((index) => {
+      const tok = tokens[index];
+      return tok !== undefined && tok !== '\n' && tok !== 'BREAK';
+    }).sort((a, b) => a - b);
+  };
+
+  const adjustSelectedPromptWeights = (target: 'positive' | 'negative', delta: number) => {
+    const tokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    indices.forEach((index) => {
+      const tok = tokens[index];
+      const muted = tok.startsWith('/*') && tok.endsWith('*/');
+      const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+      const parsed = parseWeightedToken(clean);
+      const next = Math.max(0.1, Math.min(3.0, Number((parsed.weight + delta).toFixed(2))));
+      const formatted = formatWeightedToken(parsed, next);
+      tokens[index] = muted ? `/* ${formatted} */` : formatted;
+    });
+    setPromptTokens(target, tokens);
+  };
+
+  const normalizeSelectedPromptWeights = (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    indices.forEach((index) => {
+      const tok = tokens[index];
+      const muted = tok.startsWith('/*') && tok.endsWith('*/');
+      const clean = muted ? tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim() : tok;
+      const parsed = parseWeightedToken(clean);
+      tokens[index] = muted ? `/* ${parsed.base} */` : parsed.base;
+    });
+    setPromptTokens(target, tokens);
+  };
+
+  const toggleSelectedPromptMuted = (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    const allMuted = indices.every((i) => tokens[i].startsWith('/*') && tokens[i].endsWith('*/'));
+    indices.forEach((index) => {
+      const tok = tokens[index];
+      const muted = tok.startsWith('/*') && tok.endsWith('*/');
+      const clean = tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
+      tokens[index] = allMuted ? clean : `/* ${clean} */`;
+    });
+    setPromptTokens(target, tokens);
+  };
+
+  const copySelectedPromptTokens = async (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    try {
+      await navigator.clipboard.writeText(indices.map((i) => tokens[i]).join(', '));
+      emitToast(`Copied ${indices.length} selected tag${indices.length === 1 ? '' : 's'}`, 'success');
+    } catch {
+      emitToast('Could not access the clipboard', 'warning');
+    }
+  };
+
+  const moveSelectedPromptTokens = (target: 'positive' | 'negative') => {
+    const destination = target === 'positive' ? 'negative' : 'positive';
+    const sourceTokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    const moving = indices.map((i) => sourceTokens[i]);
+    const remaining = sourceTokens.filter((_, i) => !selectedTokens[target].has(i));
+    setPromptTokens(target, remaining);
+    const destinationValue = destination === 'positive' ? prompt : negativePrompt;
+    const destinationText = destinationValue.trim();
+    const addition = moving.join(', ');
+    const next = destinationText ? `${destinationText}\n${addition}` : addition;
+    if (destination === 'positive') setPrompt(next); else setNegativePrompt(next);
+    setSelectedTokens({ positive: new Set(), negative: new Set() });
+    setFocusedPromptSection((prev) => ({ ...prev, [destination]: destinationText ? destinationText.split('\n').length : 0 }));
+    emitToast(`Moved ${indices.length} tag${indices.length === 1 ? '' : 's'} to ${destination === 'positive' ? 'Positive' : 'Negative'}`, 'success');
+  };
+
+  const extractSelectedPromptSection = (target: 'positive' | 'negative') => {
+    const tokens = getPromptTokens(target);
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return;
+    const moving = indices.map((i) => tokens[i]);
+    const remaining = tokens.filter((_, i) => !selectedTokens[target].has(i));
+    const remainder = remaining.length ? (() => {
+      let text = '';
+      remaining.forEach((tok, i) => {
+        if (tok === '\n') text = text.replace(/, $/, '') + '\n';
+        else { text += tok; if (i < remaining.length - 1 && remaining[i + 1] !== '\n') text += ', '; }
+      });
+      return text;
+    })() : '';
+    const next = remainder.trim() ? `${remainder.replace(/\n$/, '')}\n${moving.join(', ')}` : moving.join(', ');
+    setPromptValueWithHistory(target, next);
+    const newSectionIndex = next.split('\n').length - 1;
+    setFocusedPromptSection((prev) => ({ ...prev, [target]: newSectionIndex }));
+    setSelectedTokens({ ...selectedTokens, [target]: new Set() });
+  };
+
+  const replaceAllPromptText = (findText: string, replaceText: string) => {
+    if (!findText) return;
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escaped, 'gi');
+    const apply = (text: string) => text.replace(re, () => replaceText);
+    let changes = 0;
+    const countMatches = (text: string) => (text.match(re) || []).length;
+    if (findScope === 'both') {
+      changes = countMatches(prompt) + countMatches(negativePrompt);
+      setPromptValueWithHistory('positive', apply(prompt));
+      setPromptValueWithHistory('negative', apply(negativePrompt));
+    } else {
+      const target = activeTarget;
+      if (findScope === 'active-section') {
+        const focus = focusedPromptSection[target];
+        if (focus === null) { emitToast('Focus a section first, or switch scope to Active Prompt', 'warning'); return; }
+        const sections = getPromptSectionTexts(target);
+        const original = sections[focus] || '';
+        changes = countMatches(original);
+        sections[focus] = apply(original);
+        setPromptValueWithHistory(target, sections.join('\n'));
+      } else {
+        const original = target === 'positive' ? prompt : negativePrompt;
+        changes = countMatches(original);
+        const next = apply(original);
+        setPromptValueWithHistory(target, next);
+      }
+    }
+    emitToast(changes ? `Replaced ${changes} occurrence${changes === 1 ? '' : 's'}` : 'No matches found', changes ? 'success' : 'info');
+  };
+
+  const insertPromptSnippet = (snippet: string) => {
+    const target = activeTarget;
+    if (activeInsertion && activeInsertion.target === target) {
+      const tokens = getPromptTokens(target);
+      tokens.splice(activeInsertion.index, 0, snippet);
+      setPromptTokens(target, tokens);
+      setActiveInsertion({ target, index: activeInsertion.index + 1 });
+      return;
+    }
+    const current = target === 'positive' ? prompt : negativePrompt;
+    const next = current.trim() ? `${current.trim()}, ${snippet}` : snippet;
+    if (target === 'positive') setPrompt(next); else setNegativePrompt(next);
+  };
+
+  const copyEffectivePrompt = async (target: 'positive' | 'negative') => {
+    const raw = target === 'positive' ? prompt : negativePrompt;
+    const effective = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s*,\s*/g, ', ').replace(/(?:, \n|\n,)/g, '\n').trim();
+    try { await navigator.clipboard.writeText(effective); emitToast('Copied effective prompt', 'success'); }
+    catch { emitToast('Could not access the clipboard', 'warning'); }
+  };
+
+  const renderPromptSectionHeader = (
+    target: 'positive' | 'negative',
+    lineIndex: number,
+    sectionText: string,
+    isCollapsed: boolean,
+  ) => {
+    const stats = getPromptSectionStats(sectionText);
+    const focus = focusedPromptSection[target] === lineIndex;
+    const accent = target === 'positive' ? 'indigo' : 'rose';
+    return (
+      <div
+        className={`flex items-center gap-1.5 rounded-lg px-1.5 py-1 border transition-colors ${
+          focus
+            ? accent === 'indigo'
+              ? 'border-indigo-500/40 bg-indigo-500/8'
+              : 'border-rose-500/40 bg-rose-500/8'
+            : 'border-white/5 bg-white/[0.018]'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            togglePromptSectionCollapsed(target, lineIndex);
+          }}
+          className="p-0.5 rounded text-zinc-500 hover:text-zinc-100 hover:bg-white/5 cursor-pointer"
+          title={isCollapsed ? 'Expand section' : 'Collapse section'}
+        >
+          {isCollapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+        </button>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            focusPromptSection(target, focus ? null : lineIndex);
+          }}
+          className={`shrink-0 text-[10px] font-mono font-bold cursor-pointer hover:text-white ${accent === 'indigo' ? 'text-indigo-300' : 'text-rose-300'}`}
+          title={focus ? 'Exit section focus' : 'Focus this section only'}
+        >
+          S{lineIndex + 1}
+        </button>
+
+        <span className="min-w-0 flex-1 truncate text-[9px] text-zinc-400" title={getPromptSectionSummary(sectionText)}>
+          {getPromptSectionSummary(sectionText)}
+        </span>
+
+        {settings.showPromptSectionStats !== false && (
+          <span className="hidden xl:inline text-[8px] font-mono text-zinc-600 shrink-0">
+            {stats.tokenCount} tag{stats.tokenCount === 1 ? '' : 's'} · {stats.charCount}c{stats.loraCount ? ` · ${stats.loraCount} LoRA` : ''}
+          </span>
+        )}
+
+        <div className="flex items-center gap-0.5 shrink-0">
+          <button type="button" onClick={(e) => { e.stopPropagation(); copyPromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-zinc-100 hover:bg-white/5 cursor-pointer" title="Copy section">
+            <Copy className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); pastePromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-cyan-200 hover:bg-cyan-500/10 cursor-pointer" title="Paste clipboard into section">
+            <BookOpen className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); savePromptSectionPreset(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-amber-200 hover:bg-amber-500/10 cursor-pointer" title="Save section as reusable preset">
+            <Bookmark className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); duplicatePromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-emerald-200 hover:bg-emerald-500/10 cursor-pointer" title="Duplicate section">
+            <Plus className="w-3 h-3" />
+          </button>
+          <button type="button" disabled={lineIndex === 0} onClick={(e) => { e.stopPropagation(); movePromptSection(target, lineIndex, -1); }} className="p-0.5 rounded text-zinc-500 enabled:hover:text-zinc-100 enabled:hover:bg-white/5 disabled:opacity-25 cursor-pointer" title="Move section up">
+            <ChevronUp className="w-3 h-3" />
+          </button>
+          <button type="button" disabled={lineIndex === getPromptSectionTexts(target).length - 1} onClick={(e) => { e.stopPropagation(); movePromptSection(target, lineIndex, 1); }} className="p-0.5 rounded text-zinc-500 enabled:hover:text-zinc-100 enabled:hover:bg-white/5 disabled:opacity-25 cursor-pointer" title="Move section down">
+            <ChevronDown className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); clearPromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-amber-200 hover:bg-amber-500/10 cursor-pointer" title="Clear section contents">
+            <Minus className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={(e) => { e.stopPropagation(); deletePromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-rose-200 hover:bg-rose-500/10 cursor-pointer" title="Delete section">
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderPromptSectionNavigator = (target: 'positive' | 'negative') => {
+    const sections = getPromptSectionTexts(target);
+    const focused = focusedPromptSection[target];
+    const isPositive = target === 'positive';
+    return (
+      <div className="flex items-center gap-1.5 px-1 py-1 border-b border-white/5 shrink-0 overflow-x-auto">
+        <span className={`shrink-0 text-[9px] font-mono uppercase tracking-wider ${isPositive ? 'text-indigo-300/75' : 'text-rose-300/75'}`}>
+          Sections
+        </span>
+        <button
+          type="button"
+          onClick={() => focusPromptSection(target, null)}
+          className={`px-1.5 py-0.5 rounded text-[9px] font-mono cursor-pointer shrink-0 ${focused === null ? 'bg-white/10 text-zinc-100' : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'}`}
+          title="Show all sections"
+        >
+          All
+        </button>
+        {sections.map((section, index) => {
+          const stats = getPromptSectionStats(section);
+          return (
+            <button
+              key={`section-nav-${target}-${index}`}
+              type="button"
+              onClick={() => focusPromptSection(target, focused === index ? null : index)}
+              className={`px-1.5 py-0.5 rounded text-[9px] font-mono cursor-pointer shrink-0 ${
+                focused === index
+                  ? isPositive ? 'bg-indigo-500/20 text-indigo-200 ring-1 ring-indigo-500/40' : 'bg-rose-500/20 text-rose-200 ring-1 ring-rose-500/40'
+                  : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
+              }`}
+              title={`${getPromptSectionSummary(section)} · ${stats.tokenCount} tags`}
+            >
+              {index + 1}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => addPromptSection(target)}
+          className="p-0.5 rounded text-zinc-500 hover:text-emerald-200 hover:bg-emerald-500/10 cursor-pointer shrink-0"
+          title="Add a new section after the focused section"
+        >
+          <Plus className="w-3 h-3" />
+        </button>
+        <div className="flex-1" />
+        <span className="hidden lg:inline text-[8px] font-mono text-zinc-600 shrink-0">
+          {focused === null ? 'All sections' : `Editing section ${focused + 1}`}
+        </span>
+      </div>
+    );
+  };
+
+
+  const renderPromptSelectionToolbar = (target: 'positive' | 'negative') => {
+    if (settings.showPromptSelectionToolbar === false) return null;
+    const indices = getSelectedPromptIndices(target);
+    if (!indices.length) return null;
+    const step = settings.tagClickWeightStep ?? 0.2;
+    const tokens = getPromptTokens(target);
+    const allMuted = indices.every((i) => tokens[i].startsWith('/*') && tokens[i].endsWith('*/'));
+    return (
+      <div className={`flex items-center gap-1 px-2 py-1 rounded-lg border shrink-0 overflow-x-auto ${target === 'positive' ? 'bg-indigo-950/30 border-indigo-500/20' : 'bg-rose-950/30 border-rose-500/20'}`}>
+        <span className="text-[9px] font-mono font-bold text-cyan-300 shrink-0">{indices.length} selected</span>
+        <div className="w-px h-3 bg-white/10 shrink-0" />
+        <button type="button" onClick={() => adjustSelectedPromptWeights(target, -step)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-amber-300 hover:bg-amber-500/10 shrink-0" title={`Decrease weight by ${step}`}><Minus className="w-2.5 h-2.5 inline" /> W</button>
+        <button type="button" onClick={() => adjustSelectedPromptWeights(target, step)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-cyan-300 hover:bg-cyan-500/10 shrink-0" title={`Increase weight by ${step}`}><Plus className="w-2.5 h-2.5 inline" /> W</button>
+        <button type="button" onClick={() => normalizeSelectedPromptWeights(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-300 hover:bg-white/5 shrink-0" title="Remove explicit weights">1.00</button>
+        <button type="button" onClick={() => toggleSelectedPromptMuted(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-300 hover:bg-white/5 shrink-0" title={allMuted ? 'Enable selected tags' : 'Disable / comment out selected tags'}>{allMuted ? 'Enable' : 'Mute'}</button>
+        <button type="button" onClick={() => void copySelectedPromptTokens(target)} className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 shrink-0" title="Copy selected tags"><Copy className="w-3 h-3" /></button>
+        <button type="button" onClick={() => extractSelectedPromptSection(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-purple-300 hover:bg-purple-500/10 shrink-0" title="Move selected tags into a new prompt section">New Section</button>
+        <button type="button" onClick={() => moveSelectedPromptTokens(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-indigo-300 hover:bg-indigo-500/10 shrink-0" title="Move selection to the other prompt">→ {target === 'positive' ? 'Neg' : 'Pos'}</button>
+        <button type="button" onClick={() => { const indicesNow = getSelectedPromptIndices(target); const tokensNow = getPromptTokens(target); setPromptTokens(target, tokensNow.filter((_, i) => !indicesNow.includes(i))); setSelectedTokens((prev) => ({ ...prev, [target]: new Set() })); }} className="p-1 rounded text-zinc-400 hover:text-rose-300 hover:bg-rose-500/10 shrink-0" title="Delete selected tags"><Trash2 className="w-3 h-3" /></button>
+        <button type="button" onClick={() => setSelectedTokens((prev) => ({ ...prev, [target]: new Set() }))} className="p-1 rounded text-zinc-500 hover:text-white hover:bg-white/5 shrink-0" title="Clear selection"><X className="w-3 h-3" /></button>
+      </div>
+    );
+  };
+
   const renderPromptBoxBody = (target: 'positive' | 'negative') => {
 
     const isPositive = target === 'positive';
@@ -4717,10 +5123,34 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     const inputRef = isPositive ? positiveInputRef : negativeInputRef;
 
     const lineRows = parseTokenLines(tokens);
+    const focusIndex = focusedPromptSection[target] !== null && focusedPromptSection[target]! < lineRows.length
+      ? focusedPromptSection[target]
+      : null;
+    const visibleLineRows = focusIndex === null
+      ? lineRows
+      : lineRows.filter((row) => row.lineIndex === focusIndex);
 
 
 
     if (viewMode === 'text') {
+      if (focusIndex !== null) {
+        const sectionTexts = getPromptSectionTexts(target);
+        const focusedText = sectionTexts[focusIndex] ?? '';
+        return (
+          <div className="flex-1 min-h-0 flex flex-col gap-1 rounded-xl border border-white/10 bg-[#090b10] overflow-hidden">
+            <div className="px-2 py-1 text-[9px] font-mono text-zinc-500 border-b border-white/5 shrink-0">Focused section {focusIndex + 1} — edits stay inside this section</div>
+            <PromptAutosuggestTextarea
+              value={focusedText}
+              onChange={(nextValue) => updatePromptSections(target, (sections) => {
+                sections[focusIndex] = nextValue.replace(/\r\n/g, '\n').replace(/\n/g, ', ');
+                return sections;
+              })}
+              placeholder={isPositive ? 'Edit this positive-prompt section...' : 'Edit this negative-prompt section...'}
+              target={target}
+            />
+          </div>
+        );
+      }
 
       return (
 
@@ -4752,6 +5182,42 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
           const isCtrlOrMeta = e.ctrlKey || e.metaKey;
 
+          if (e.key === 'Escape' && focusedPromptSection[target] !== null) {
+            e.preventDefault();
+            focusPromptSection(target, null);
+            return;
+          }
+
+          if (e.altKey && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+            const sections = getPromptSectionTexts(target);
+            const current = focusedPromptSection[target];
+            const delta = e.key === 'ArrowRight' ? 1 : -1;
+            const next = current === null ? (delta > 0 ? 0 : sections.length - 1) : current + delta;
+            if (next >= 0 && next < sections.length) {
+              e.preventDefault();
+              focusPromptSection(target, next);
+            }
+            return;
+          }
+
+          const keyboardTarget = e.target as HTMLElement;
+          const isEditableTarget = keyboardTarget.tagName === 'INPUT' || keyboardTarget.tagName === 'TEXTAREA' || keyboardTarget.isContentEditable;
+
+          if (!isEditableTarget && isCtrlOrMeta && e.key.toLowerCase() === 'a') {
+            e.preventDefault();
+            const all = getPromptTokens(target);
+            setSelectedTokens((prev) => ({ ...prev, [target]: new Set(all.map((tok, i) => tok !== '\n' && tok !== 'BREAK' ? i : -1).filter((i) => i >= 0)) }));
+            return;
+          }
+
+          if (!isEditableTarget && (e.key === 'Backspace' || e.key === 'Delete') && getSelectedPromptIndices(target).length > 0) {
+            e.preventDefault();
+            const selected = new Set(getSelectedPromptIndices(target));
+            setPromptTokens(target, getPromptTokens(target).filter((_, i) => !selected.has(i)));
+            setSelectedTokens((prev) => ({ ...prev, [target]: new Set() }));
+            return;
+          }
+
           if (isCtrlOrMeta && e.key.toLowerCase() === 'z') {
 
             e.preventDefault();
@@ -4766,6 +5232,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
             }
 
+          } else if (isCtrlOrMeta && e.shiftKey && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            const selected = getSelectedPromptIndices(target);
+            if (selected.length) void copySelectedPromptTokens(target);
+            else void copyEffectivePrompt(target);
           } else if (isCtrlOrMeta && e.key.toLowerCase() === 'y') {
 
             e.preventDefault();
@@ -4796,13 +5267,20 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
       >
 
-        {lineRows.map((row) => (
+        {visibleLineRows.map((row) => {
+          const sectionText = row.items.map((item) => item.text).join(', ');
+          const isCollapsed = collapsedPromptSections[target].includes(row.lineIndex);
+          return (
 
           <div key={`row-group-${row.lineIndex}`} className="w-full flex flex-col gap-1.5">
+            {settings.showPromptSectionHeaders !== false &&
+              renderPromptSectionHeader(target, row.lineIndex, sectionText, isCollapsed)}
 
-            {/* Tag Row: Clean wrapping with uniform gap and no vertical overlap */}
+            {!isCollapsed && (
+              <>
+                {/* Tag Row: Clean wrapping with uniform gap and no vertical overlap */}
 
-            <div
+                <div
 
               onClick={(e) => {
 
@@ -4888,6 +5366,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 const isLoraPill = parsedPillToken.isLora;
 
+                // LoRAs are managed in the dedicated strip above the prompt box. Keep them in
+                // the serialized prompt, but hide the duplicate inline pill unless enabled.
+                if (isLoraPill && settings.hideInlineLorasInPromptBoxes !== false) return null;
+
 
 
                 return (
@@ -4969,15 +5451,17 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           for (let i = start; i <= end; i++) currentSet.add(i);
 
+                        } else if (e.ctrlKey || e.metaKey) {
+
+                          if (currentSet.has(idx)) currentSet.delete(idx);
+                          else currentSet.add(idx);
+                          selectionAnchorRef.current = idx;
+
                         } else {
 
-                          if (!currentSet.has(idx)) {
+                          currentSet.clear();
 
-                            currentSet.clear();
-
-                            currentSet.add(idx);
-
-                          }
+                          currentSet.add(idx);
 
                         }
 
@@ -4986,12 +5470,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                       }}
 
                       onMouseEnter={() => {
-
-                        const container = isPositive ? positiveInputRef.current?.closest('.overflow-y-auto') : negativeInputRef.current?.closest('.overflow-y-auto');
-
-                        if (container) (container as HTMLElement).style.overflowY = 'hidden';
-
-
 
                         if (!isSelecting || selectionAnchorRef.current === null) return;
 
@@ -5008,11 +5486,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                       }}
 
                       onMouseLeave={() => {
-
-                        const container = isPositive ? positiveInputRef.current?.closest('.overflow-y-auto') : negativeInputRef.current?.closest('.overflow-y-auto');
-
-                        if (container) (container as HTMLElement).style.overflowY = 'auto';
-
+                        // Keep hover side-effect free so pill width never changes under the cursor.
                       }}
 
                       ref={bindPillWheelLock((e: WheelEvent) => {
@@ -5075,13 +5549,12 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                         }
 
-                        setEditingIndex(null);
-
-                        const updated = [...tokens];
-
-                        updated[idx] = isMuted ? cleanToken : `/* ${cleanToken} */`;
-
-                        setPromptTokens(target, updated);
+                        if (settings.doubleClickEditPromptPills !== false) {
+                          setEditingIndex({ target, index: idx });
+                          setEditingText(token);
+                        } else {
+                          toggleTokenMutedAt(target, idx);
+                        }
 
                       }}
 
@@ -5102,30 +5575,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                         }
 
 
-
-                        // Immediate mute toggle on second click of sequence
-
-                        if (e.detail >= 2) {
-
-                          if (pillClickTimeoutRef.current) {
-
-                            clearTimeout(pillClickTimeoutRef.current);
-
-                            pillClickTimeoutRef.current = null;
-
-                          }
-
-                          setEditingIndex(null);
-
-                          const updated = [...tokens];
-
-                          updated[idx] = isMuted ? cleanToken : `/* ${cleanToken} */`;
-
-                          setPromptTokens(target, updated);
-
-                          return;
-
-                        }
 
 
 
@@ -5175,7 +5624,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       }`}
 
-                      title={isLoraPill ? 'Left click: Edit • Scroll: Adjust LoRA weight • Double click: Disable' : 'Left click: Edit • Drag: Multiselect • Double click: Disable • Scroll: Weight'}
+                      title={isLoraPill ? 'Click: Select • Double click: Edit • Scroll: Adjust LoRA weight • Right click: Actions' : 'Click: Select • Ctrl/Cmd+click: Multi-select • Double click: Edit • Scroll: Weight • Right click: Actions'}
 
                     >
 
@@ -5197,17 +5646,21 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           onKeyDown={(e) => {
 
-                            if (e.key === 'Enter') submitPromptboxEdit(target, idx);
+                            if (e.key === 'Enter') { e.preventDefault(); submitPromptboxEdit(target, idx); }
 
-                            if (e.key === 'Escape') setEditingIndex(null);
+                            if (e.key === 'Escape') { e.preventDefault(); setEditingIndex(null); }
 
                           }}
 
                           onBlur={() => submitPromptboxEdit(target, idx)}
 
+                          onMouseDown={(e) => e.stopPropagation()}
+
                           onClick={(e) => e.stopPropagation()}
 
-                          className="bg-transparent text-white p-0 m-0 outline-none border-none text-[11px] font-mono leading-tight"
+                          onDoubleClick={(e) => e.stopPropagation()}
+
+                          className="bg-transparent text-white p-0 m-0 outline-none border-none text-[11px] font-mono leading-tight select-text"
 
                         />
 
@@ -5373,13 +5826,13 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
               )}
 
-            </div>
+                </div>
 
 
 
-            {/* Line Break Separator Bar (Independent Full-Width Block) */}
+                {/* Line Break Separator Bar (Independent Full-Width Block) */}
 
-            {row.breakIndexAfter !== null && (
+                {row.breakIndexAfter !== null && (
 
               <div
 
@@ -5429,13 +5882,15 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 <div className="flex-1 border-b border-dashed border-white/15 group-hover/br:border-cyan-400/50 transition-colors" />
 
-              </div>
+                  </div>
 
+                )}
+              </>
             )}
-
           </div>
 
-        ))}
+          );
+        })}
 
       </div>
 
@@ -5455,9 +5910,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     >
 
-      {/* Top Left Layout Mode Selector Bar */}
-
-      <div className="h-8 px-2.5 bg-[#0e1017] border-b border-white/10 flex items-center justify-between shrink-0 z-20">
+      {/* Prompt layout controls; can be hidden from the compact prompt header. */}
+      {showPromptLayoutControls && <div className="h-8 px-2.5 bg-[#0e1017] border-b border-white/10 flex items-center justify-between shrink-0 z-20">
 
         <div className="flex items-center gap-1 bg-black/50 border border-white/10 p-0.5 rounded-lg">
 
@@ -5537,8 +5991,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500">
-
+        <div className="flex items-center gap-1.5 text-[10px] font-mono text-zinc-500">
+          <button type="button" onClick={() => void openPromptPillsPopup()} className="px-2 py-1 rounded-md border border-cyan-500/20 bg-cyan-500/5 text-cyan-200 hover:bg-cyan-500/10 hover:text-white cursor-pointer transition" title="Open Prompt Pills in a separate Tauri window">
+            Popout
+          </button>
           <span className="text-cyan-400 font-semibold">{activeMacroCategory}</span>
 
           <span>→</span>
@@ -5547,11 +6003,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
         </div>
 
-      </div>
+      </div>}
 
 
 
-      <div className="relative flex items-center justify-between gap-2 px-2.5 py-1.5 bg-[#111315] border-b border-white/5 shrink-0">
+      {showPromptToolsBar && <div className="relative flex items-center justify-between gap-2 px-2.5 py-1.5 bg-[#111315] border-b border-white/5 shrink-0">
 
         <div className="flex items-center gap-1">
 
@@ -5562,6 +6018,9 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'cleanup' ? null : 'cleanup')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'cleanup' ? 'bg-[#3a301f] text-[#efd18f]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Clean</button>
 
           <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'diff' ? null : 'diff')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'diff' ? 'bg-[#253039] text-[#b9dcec]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Diff</button>
+          <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'sections' ? null : 'sections')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'sections' ? 'bg-[#3a301f] text-[#efd18f]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Section Library</button>
+          <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'find' ? null : 'find')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'find' ? 'bg-[#253039] text-[#b9dcec]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Find/Replace</button>
+          {settings.promptSyntaxQuickInsert !== false && <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'syntax' ? null : 'syntax')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'syntax' ? 'bg-[#302341] text-[#e0c8ff]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Syntax</button>}
 
         </div>
 
@@ -5613,7 +6072,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 className="flex-1 px-2 py-1 rounded bg-[#24272a] hover:bg-[#2d3033] text-[9px] text-[#eeeae2] cursor-pointer flex items-center justify-center gap-1"
 
-                title="Download your prompt slots and LoRA presets as a JSON file"
+                title="Download your prompt slots, LoRA presets, and reusable section presets as a JSON file"
 
               >
 
@@ -5701,7 +6160,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
             </div>
 
-            <button type="button" onClick={() => { const cleaner = (text: string) => { const raw = cleanupOptions.normalizeSeparators ? text.replace(/[，、]+/g, ',') : text; const lines = raw.split('\n'); return lines.map((line) => { let tokens = line.split(',').map((t) => t.trim()).filter(cleanupOptions.removeEmpty ? Boolean : () => true); if (cleanupOptions.removeDuplicates) { const seen = new Set<string>(); tokens = tokens.filter((token) => { const key = token.replace(/^\(+|\)+$/g, '').split(':')[0].trim().toLowerCase().replace(/[\s_]+/g, '_'); if (seen.has(key)) return false; seen.add(key); return true; }); } if (cleanupOptions.normalizeUnderscores) tokens = tokens.map((token) => token.replace(/_/g, ' ')); if (cleanupOptions.sortTags) tokens.sort((a,b) => a.localeCompare(b)); return tokens.join(', '); }).join('\n'); }; setPrompt(cleaner(prompt)); setNegativePrompt(cleaner(negativePrompt)); setPromptToolsOpen(null); emitToast('Prompt cleanup applied', 'success'); }} className="w-full mt-3 px-3 py-1.5 rounded-lg bg-[#3a301f] hover:bg-[#493b22] text-[#efd18f] text-[10px] font-semibold cursor-pointer">Apply cleanup</button>
+            <button type="button" onClick={() => { const cleaner = (text: string) => { const raw = cleanupOptions.normalizeSeparators ? text.replace(/[，、]+/g, ',') : text; const lines = raw.split('\n'); return lines.map((line) => { let tokens = splitPromptTokens(line).filter(cleanupOptions.removeEmpty ? Boolean : () => true); if (cleanupOptions.removeDuplicates) { const seen = new Set<string>(); tokens = tokens.filter((token) => { const key = token.replace(/^\(+|\)+$/g, '').split(':')[0].trim().toLowerCase().replace(/[\s_]+/g, '_'); if (seen.has(key)) return false; seen.add(key); return true; }); } if (cleanupOptions.normalizeUnderscores) tokens = tokens.map((token) => token.replace(/_/g, ' ')); if (cleanupOptions.sortTags) tokens.sort((a,b) => a.localeCompare(b)); return tokens.join(', '); }).join('\n'); }; setPrompt(cleaner(prompt)); setNegativePrompt(cleaner(negativePrompt)); setPromptToolsOpen(null); emitToast('Prompt cleanup applied', 'success'); }} className="w-full mt-3 px-3 py-1.5 rounded-lg bg-[#3a301f] hover:bg-[#493b22] text-[#efd18f] text-[10px] font-semibold cursor-pointer">Apply cleanup</button>
 
           </div>
 
@@ -5745,7 +6204,70 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
         )}
 
-      </div>
+      </div>}
+
+
+        {promptToolsOpen === 'sections' && (
+          <div className="absolute left-32 top-full z-50 w-[34rem] max-h-80 overflow-y-auto p-3 rounded-xl bg-[#1a1c1e] shadow-2xl ring-1 ring-white/10">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] uppercase tracking-widest text-[#9d978e]">Section Library</div>
+              <span className="text-[9px] text-zinc-600">Active prompt: {activeTarget}</span>
+            </div>
+            {promptSectionPresets.length === 0 ? (
+              <div className="p-5 text-center text-xs text-[#77736b]">Save a section with the bookmark button in a section header.</div>
+            ) : promptSectionPresets.map((preset) => (
+              <div key={preset.id} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-white/[0.035]">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] text-zinc-200 truncate">{preset.name}</div>
+                  <div className="text-[9px] text-zinc-600 truncate">{preset.text}</div>
+                </div>
+                <button type="button" onClick={() => applyPromptSectionPreset(preset, activeTarget)} className="px-2 py-1 rounded bg-[#3a301f] hover:bg-[#493b22] text-[9px] text-[#efd18f] cursor-pointer">Apply</button>
+                <button type="button" onClick={() => deletePromptSectionPreset(preset.id)} className="p-1 rounded text-zinc-500 hover:text-rose-300 cursor-pointer" title="Delete preset"><Trash2 className="w-3 h-3" /></button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {promptToolsOpen === 'find' && (
+          <div className="absolute left-48 top-full z-50 w-80 p-3 rounded-xl bg-[#1a1c1e] shadow-2xl ring-1 ring-white/10">
+            <div className="text-[10px] uppercase tracking-widest text-[#9d978e] mb-2">Find / Replace</div>
+            <input value={findQuery} onChange={(e) => setFindQuery(e.target.value)} placeholder="Find text or tag..." className="w-full mb-1.5 px-2.5 py-1.5 rounded-lg bg-black/30 border border-white/10 text-xs text-zinc-200 outline-none" />
+            <input value={replaceQuery} onChange={(e) => setReplaceQuery(e.target.value)} placeholder="Replace with..." className="w-full mb-2 px-2.5 py-1.5 rounded-lg bg-black/30 border border-white/10 text-xs text-zinc-200 outline-none" />
+            <div className="flex items-center gap-1 mb-2">
+              {(['active-section','active-prompt','both'] as const).map((scope) => (
+                <button type="button" key={scope} onClick={() => setFindScope(scope)} className={`px-2 py-1 rounded text-[9px] font-mono cursor-pointer ${findScope === scope ? 'bg-indigo-600 text-white' : 'bg-white/5 text-zinc-500 hover:text-zinc-200'}`}>
+                  {scope === 'active-section' ? 'Section' : scope === 'active-prompt' ? 'Active Prompt' : 'Both'}
+                </button>
+              ))}
+            </div>
+            <button type="button" onClick={() => replaceAllPromptText(findQuery, replaceQuery)} className="w-full px-3 py-1.5 rounded-lg bg-[#3a301f] hover:bg-[#493b22] text-[#efd18f] text-[10px] font-semibold cursor-pointer">Replace All</button>
+            <div className="mt-2 text-[9px] text-zinc-600">Section scope uses the currently focused section. Matching is case-insensitive.</div>
+          </div>
+        )}
+
+        {promptToolsOpen === 'syntax' && settings.promptSyntaxQuickInsert !== false && (
+          <div className="absolute left-64 top-full z-50 w-[30rem] p-3 rounded-xl bg-[#1a1c1e] shadow-2xl ring-1 ring-white/10">
+            <div className="text-[10px] uppercase tracking-widest text-[#9d978e] mb-2">SwarmUI Prompt Syntax</div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {[
+                ['Random', '<random:red, blue>'],
+                ['Alternate', '<alternate:day, night>'],
+                ['From → To', '<fromto[0.5]:day, night>'],
+                ['Wildcard', '<wildcard:animals>'],
+                ['Repeat', '<repeat:2, detail>'],
+                ['Embedding', '<embed:filename>'],
+                ['Comment', '<comment:note>'],
+                ['Parameter', '<param[cfgscale]:7>'],
+              ].map(([label, snippet]) => (
+                <button type="button" key={snippet} onClick={() => { insertPromptSnippet(snippet); setPromptToolsOpen(null); }} className="text-left px-2 py-1.5 rounded-lg bg-white/[0.025] hover:bg-white/[0.07] border border-white/5 cursor-pointer">
+                  <div className="text-[10px] text-zinc-200">{label}</div>
+                  <div className="text-[9px] font-mono text-purple-300 truncate">{snippet}</div>
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 text-[9px] text-zinc-600">Inserts at the active caret; otherwise appends to the active prompt. Nested commas stay inside the syntax pill.</div>
+          </div>
+        )}
 
       {/* Prompts Section (Visible in 'split' and 'prompts_only') */}
 
@@ -5960,9 +6482,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </div>
 
             {renderLoraPillsBar('positive')}
+            {renderPromptSectionNavigator('positive')}
 
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
 
+              {renderPromptSelectionToolbar('positive')}
               {renderPromptBoxBody('positive')}
 
             </div>
@@ -6022,6 +6546,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   <span>Clean</span>
 
                 </button>
+                <button type="button" onClick={(e) => { e.stopPropagation(); void copyEffectivePrompt('negative'); }} className="px-1.5 py-0.2 bg-[#202434] hover:bg-rose-900/60 text-gray-300 hover:text-white rounded text-[9px] font-mono border border-[#31374d] cursor-pointer transition" title="Copy prompt with disabled/commented tags removed">Effective</button>
 
                 <button
 
@@ -6106,9 +6631,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </div>
 
             {renderLoraPillsBar('negative')}
+            {renderPromptSectionNavigator('negative')}
 
-            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
+            <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1">
 
+              {renderPromptSelectionToolbar('negative')}
               {renderPromptBoxBody('negative')}
 
             </div>
@@ -6220,17 +6747,27 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
           <button
-
             type="button"
-
             onClick={() => setIsTagBrowserCollapsed(!isTagBrowserCollapsed)}
-
             className="px-2.5 py-0.5 bg-[#181a24] hover:bg-[#25293a] border border-[#2e3346] text-indigo-300 rounded font-mono text-[10px] transition cursor-pointer shrink-0 ml-2"
-
           >
-
             <span>{isTagBrowserCollapsed ? '▲ Show Tags' : '▼ Cover with Prompts'}</span>
-
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowPromptLayoutControls((value) => !value)}
+            className={`px-2 py-0.5 rounded font-mono text-[9px] transition cursor-pointer shrink-0 ${showPromptLayoutControls ? 'bg-white/[0.06] text-zinc-300 border border-white/10' : 'bg-black/20 text-zinc-600 border border-white/5'}`}
+            title="Show/hide Both / Tags Only / Prompts Only"
+          >
+            View
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowPromptToolsBar((value) => !value)}
+            className={`px-2 py-0.5 rounded font-mono text-[9px] transition cursor-pointer shrink-0 ${showPromptToolsBar ? 'bg-white/[0.06] text-zinc-300 border border-white/10' : 'bg-black/20 text-zinc-600 border border-white/5'}`}
+            title="Show/hide Slots / History / Clean / Diff / Section Library / Find / Syntax"
+          >
+            Tools
           </button>
 
         </div>
@@ -7949,7 +8486,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
 
           </div>
 
-          <button onClick={() => loadAssets()} title="Refresh model, LoRA and embedding catalogs" aria-label="Refresh asset catalogs" className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer">
+          <button onClick={() => void loadAssets(true)} title="Refresh model, LoRA and embedding catalogs" aria-label="Refresh asset catalogs" className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer">
 
             <RotateCw className="w-3 h-3" />
 
@@ -8763,6 +9300,20 @@ const MetadataModal: React.FC<{ item: HistoryItem | null; onClose: () => void }>
 
         <div className="p-4 overflow-y-auto space-y-3 font-mono">
 
+          <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2">
+            <img
+              src={resolveImageUrl(item.imageUrl)}
+              alt="Generation preview"
+              onError={handleImageError}
+              className="h-16 w-16 shrink-0 rounded-md object-cover border border-white/10 bg-black/40"
+            />
+            <div className="min-w-0 text-[10px] text-gray-500">
+              <div className="text-gray-300">{item.serverOrigin ? 'Server history' : 'Current session'}</div>
+              {item.serverPath && <div className="mt-0.5 break-all">{item.serverPath}</div>}
+              {item.rawMetadata && <div className="mt-1 text-emerald-300/80">SwarmUI metadata attached</div>}
+            </div>
+          </div>
+
           <div>
 
             <label className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold block mb-1">Prompt</label>
@@ -8829,7 +9380,32 @@ const MetadataModal: React.FC<{ item: HistoryItem | null; onClose: () => void }>
 
             </div>
 
+            <div className="bg-[#0e0f17] p-2 rounded border border-[#25293d]">
+
+              <span className="text-gray-500 block text-[10px]">Sampler / Scheduler</span>
+
+              <span className="text-gray-200 break-all">{item.params.sampler || 'Unknown'} · {item.params.scheduler || 'Unknown'}</span>
+
+            </div>
+
           </div>
+
+          {item.rawMetadata && (
+            <details className="rounded-lg border border-white/10 bg-black/20 overflow-hidden">
+              <summary className="cursor-pointer select-none px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-gray-400 hover:text-gray-200">
+                Raw SwarmUI Metadata
+              </summary>
+              <pre className="max-h-64 overflow-auto border-t border-white/10 bg-[#090b10] p-3 text-[9px] leading-relaxed text-gray-400 whitespace-pre-wrap break-words select-text">
+                {(() => {
+                  try {
+                    return JSON.stringify(JSON.parse(item.rawMetadata), null, 2);
+                  } catch {
+                    return item.rawMetadata;
+                  }
+                })()}
+              </pre>
+            </details>
+          )}
 
         </div>
 
@@ -8978,6 +9554,24 @@ function useFieldSearchSuggestions(query: string, modelsList: ModelItem[], loras
 }
 
 
+
+const openHistoryItemFolder = async (item: HistoryItem, outputFolderPath?: string) => {
+  try {
+    let resolvedPath: string;
+    if (item.localProjectFile && item.localProjectRoot) {
+      const root = item.localProjectRoot.replace(/[\\/]+$/, '');
+      const relative = item.localProjectFile.replace(/^[/\\]+/, '').replace(/\//g, '\\');
+      resolvedPath = `${root}\\${relative}`;
+    } else {
+      resolvedPath = await swarmClient.resolveOutputImagePath(outputFolderPath, item.serverPath || item.imageUrl);
+    }
+    await swarmClient.revealFilesystemPath(resolvedPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Workspace] Could not open image folder:', error);
+    emitToast(`Could not open image folder: ${message}`, 'error');
+  }
+};
 
 const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
@@ -9128,11 +9722,11 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
       {
 
-        label: 'Inspect Generation Info',
+        label: 'Our Generation Info',
 
         icon: <Info className="w-3.5 h-3.5 text-amber-400" />,
 
-        action: () => setSelectedMetaItem(item)
+        action: () => requestGenerationViewer(item)
 
       },
 
@@ -9199,6 +9793,12 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
         action: () => setParams({ activeImage: resolveImageUrl(item.imageUrl) })
 
+      },
+
+      {
+        label: 'Open in Folder',
+        icon: <FolderOpen className="w-3.5 h-3.5 text-sky-400" />,
+        action: () => void openHistoryItemFolder(item, settings.outputFolderPath),
       },
 
       {
@@ -9477,7 +10077,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
                       key={item.id || index}
 
-                      onClick={() => setParams({ activeImage: finalImageUrl })}
+                      onClick={() => requestGenerationViewer(item)}
 
                       onContextMenu={(e) => handleHistoryContextMenu(e, item)}
 
@@ -9768,9 +10368,10 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const {
 
-    galleryHistory, history, setParams, useGenerationParams, setComparisonImage,
+    galleryHistory, projectHistory, history, sessionStartTime, setParams, useGenerationParams, setComparisonImage,
 
-    deleteHistoryItem, setActiveContextMenu, syncServerGallery, settings, updateSettings,
+    deleteHistoryItem, setActiveContextMenu, syncServerGallery, loadMoreServerGalleryPages, loadServerGalleryPage, loadProjectGallery, settings, updateSettings,
+    outputGalleryTotalCount, outputGalleryLoadedPageNumbers, outputGalleryPages,
 
     galleryCurrentPage, setGalleryCurrentPage, toggleFavorite,
     rerollFromHistory, branchFromHistory, getLineageAncestors, getLineageChildren, setModel,
@@ -9778,11 +10379,14 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   } = useAppStore(useShallow((s) => ({
 
-    galleryHistory: s.galleryHistory, history: s.history, setParams: s.setParams, useGenerationParams: s.useGenerationParams,
+    galleryHistory: s.galleryHistory, projectHistory: s.projectHistory, history: s.history, sessionStartTime: s.sessionStartTime, setParams: s.setParams, useGenerationParams: s.useGenerationParams,
 
     setComparisonImage: s.setComparisonImage, deleteHistoryItem: s.deleteHistoryItem, setActiveContextMenu: s.setActiveContextMenu,
 
-    syncServerGallery: s.syncServerGallery, settings: s.settings, updateSettings: s.updateSettings, galleryCurrentPage: s.galleryCurrentPage,
+    syncServerGallery: s.syncServerGallery, loadMoreServerGalleryPages: s.loadMoreServerGalleryPages, loadServerGalleryPage: s.loadServerGalleryPage, loadProjectGallery: s.loadProjectGallery, settings: s.settings, updateSettings: s.updateSettings,
+    outputGalleryTotalCount: s.outputGalleryTotalCount,
+    outputGalleryLoadedPageNumbers: s.outputGalleryLoadedPageNumbers, outputGalleryPages: s.outputGalleryPages,
+    galleryCurrentPage: s.galleryCurrentPage,
 
     setGalleryCurrentPage: s.setGalleryCurrentPage, toggleFavorite: s.toggleFavorite,
     rerollFromHistory: s.rerollFromHistory, branchFromHistory: s.branchFromHistory,
@@ -9836,34 +10440,48 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
   const { suggestions: gallerySuggestions, activeField: galleryActiveField, applySuggestion: applyGallerySuggestion, dismiss: dismissGallerySuggestions } = useFieldSearchSuggestions(gallerySearchQuery, modelsList, lorasList);
 
   const [isSyncingServer, setIsSyncingServer] = useState(false);
+  const autoGalleryLoadRef = useRef<string | null>(null);
 
-  // Switch between App-only local store history or all server image history
+  // Session is the default gallery source: unlike the persisted History array,
+  // this dataset is intentionally restricted to generations created in the current app session.
+  const sessionGallery = useMemo(() => {
+    if (!sessionStartTime) return history || [];
+    return (history || []).filter((item) => {
+      const itemTime = item.timestamp || Number(item.id?.split('-')[1]) || 0;
+      return itemTime >= sessionStartTime;
+    });
+  }, [history, sessionStartTime]);
 
-  const rawDataset = settings.gallerySource === 'all' ? (galleryHistory || []) : (history || []);
-
-
+  const rawDataset = settings.gallerySource === 'session'
+    ? sessionGallery
+    : settings.gallerySource === 'project'
+    ? (projectHistory || [])
+    : (galleryHistory || []);
 
   const filteredGallery = useMemo(() => {
-
     return rawDataset
-
       .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
-
       .filter((item) => matchesGenerationQuery(item, gallerySearchQuery));
-
   }, [rawDataset, showFavoritesOnly, gallerySearchQuery]);
 
-
-
   const pageSize = settings.galleryPageSize || 24;
-
-  const totalPages = Math.ceil(filteredGallery.length / pageSize) || 1;
-
+  const isAllOutputs = settings.gallerySource === 'outputs';
+  const isUnfilteredOutputView = isAllOutputs && !showFavoritesOnly && !gallerySearchQuery.trim();
+  const outputTotalPages = Math.max(1, Math.ceil((outputGalleryTotalCount || 0) / pageSize));
+  const totalPages = isUnfilteredOutputView
+    ? outputTotalPages
+    : (Math.ceil(filteredGallery.length / pageSize) || 1);
   const safeCurrentPage = Math.min(galleryCurrentPage, totalPages);
-
   const startIndex = (safeCurrentPage - 1) * pageSize;
-
-  const paginatedItems = filteredGallery.slice(startIndex, startIndex + pageSize);
+  const outputLoadedSet = useMemo(() => new Set(outputGalleryLoadedPageNumbers || []), [outputGalleryLoadedPageNumbers]);
+  const paginatedItems = isUnfilteredOutputView
+    ? (outputGalleryPages[safeCurrentPage] || [])
+    : filteredGallery.slice(startIndex, startIndex + pageSize);
+  const currentOutputPageLoaded = !isAllOutputs || outputLoadedSet.has(safeCurrentPage);
+  const outputPagesRemaining = Math.max(0, outputTotalPages - outputLoadedSet.size);
+  const [isLoadingMoreOutputs, setIsLoadingMoreOutputs] = useState(false);
+  const outputPrefetchInFlightRef = useRef<number | null>(null);
+  const [pageJumpValue, setPageJumpValue] = useState(String(Math.min(galleryCurrentPage, totalPages)));
 
 
 
@@ -9879,11 +10497,11 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
       {
 
-        label: 'Inspect Generation Info',
+        label: 'Our Generation Info',
 
         icon: <Info className="w-3.5 h-3.5 text-amber-400" />,
 
-        action: () => setSelectedMetaItem(item)
+        action: () => requestGenerationViewer(item)
 
       },
 
@@ -9953,6 +10571,12 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
       },
 
       {
+        label: 'Open in Folder',
+        icon: <FolderOpen className="w-3.5 h-3.5 text-sky-400" />,
+        action: () => void openHistoryItemFolder(item, settings.outputFolderPath),
+      },
+
+      {
 
         separator: true,
 
@@ -9977,14 +10601,85 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
 
   const handleSyncServer = async () => {
-
     setIsSyncingServer(true);
-
-    await syncServerGallery();
-
-    setIsSyncingServer(false);
-
+    outputPrefetchInFlightRef.current = null;
+    try {
+      await syncServerGallery(true);
+    } finally {
+      setIsSyncingServer(false);
+    }
   };
+
+  // Progressive All Outputs loading. Pages are cached individually, so navigating backwards
+  // never rescans earlier pages. Near the end of the currently cached range we fetch another
+  // five-page window; direct jumps use the helper below and only fetch the target window.
+  useEffect(() => {
+    if (!isUnfilteredOutputView || isSyncingServer || !outputTotalPages) return;
+    if (!outputGalleryLoadedPageNumbers.length) return;
+    const maxCachedPage = Math.max(...outputGalleryLoadedPageNumbers);
+    if (safeCurrentPage < Math.max(1, maxCachedPage - 1)) return;
+    if (maxCachedPage >= outputTotalPages) return;
+    const nextStartPage = maxCachedPage + 1;
+    if (outputPrefetchInFlightRef.current === nextStartPage) return;
+    outputPrefetchInFlightRef.current = nextStartPage;
+    setIsLoadingMoreOutputs(true);
+    void loadMoreServerGalleryPages(nextStartPage, Math.min(5, outputTotalPages - nextStartPage + 1)).finally(() => {
+      setIsLoadingMoreOutputs(false);
+      outputPrefetchInFlightRef.current = null;
+    });
+  }, [
+    isUnfilteredOutputView,
+    isSyncingServer,
+    outputGalleryLoadedPageNumbers,
+    outputTotalPages,
+    safeCurrentPage,
+    loadMoreServerGalleryPages,
+  ]);
+
+  const navigateOutputPage = useCallback(async (requestedPage: number) => {
+    const target = Math.max(1, Math.min(totalPages, Math.floor(requestedPage) || 1));
+    setGalleryCurrentPage(target);
+    setPageJumpValue(String(target));
+    if (!isUnfilteredOutputView || outputGalleryPages[target]) return;
+
+    // Fetch a five-page window centered around a far jump, but never walk through hundreds of
+    // intermediate pages. This makes "go to page 413" practical even for very large libraries.
+    const windowSize = Math.min(5, totalPages);
+    const half = Math.floor(windowSize / 2);
+    const start = Math.max(1, Math.min(target - half, totalPages - windowSize + 1));
+    setIsLoadingMoreOutputs(true);
+    try {
+      await loadMoreServerGalleryPages(start, windowSize);
+    } finally {
+      setIsLoadingMoreOutputs(false);
+    }
+  }, [totalPages, isUnfilteredOutputView, outputGalleryPages, loadMoreServerGalleryPages, setGalleryCurrentPage]);
+
+  useEffect(() => {
+    if (!isUnfilteredOutputView) return;
+    setPageJumpValue(String(safeCurrentPage));
+  }, [safeCurrentPage, isUnfilteredOutputView]);
+
+
+  // Session mode needs no backend scan. Local Project reads image files from the app-local
+  // project folder, while All Outputs scans the configured Stability Matrix / SwarmUI folder.
+  useEffect(() => {
+    const source = settings.gallerySource;
+    if (source === 'session') {
+      autoGalleryLoadRef.current = null;
+      return;
+    }
+    if (autoGalleryLoadRef.current === source) return;
+    autoGalleryLoadRef.current = source;
+
+    if (source === 'project') {
+      void loadProjectGallery();
+    } else {
+      void handleSyncServer();
+    }
+    // The source toggle is the intentional trigger; StrictMode replay is guarded by the ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.gallerySource]);
 
 
 
@@ -9995,9 +10690,9 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5 flex-wrap gap-2">
 
         <span className="font-semibold text-gray-300 flex items-center gap-1">
-
-          <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Gallery ({filteredGallery.length})
-
+          <ImageIcon className="w-3.5 h-3.5 text-purple-400" />
+          Gallery ({isUnfilteredOutputView ? outputGalleryTotalCount.toLocaleString() : filteredGallery.length.toLocaleString()})
+          {isUnfilteredOutputView && outputLoadedSet.size > 0 ? <span className="text-[9px] text-zinc-600 font-normal">· {outputLoadedSet.size.toLocaleString()} page{outputLoadedSet.size === 1 ? '' : 's'} cached</span> : null}
         </span>
 
 
@@ -10080,39 +10775,33 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
         <div className="flex items-center gap-1.5 flex-wrap">
 
-          {/* Source Switcher Toggle */}
-
-          <button
-
-            onClick={() => updateSettings({ gallerySource: settings.gallerySource === 'app' ? 'all' : 'app' })}
-
-            className="px-2 py-0.5 bg-[#181a24] hover:bg-amber-800 hover:text-white border border-[#2b2f3a] text-indigo-300 rounded cursor-pointer transition text-[10px] font-mono"
-
-            title="Toggle between App-only history and all Server outputs"
-
+          {/* Gallery source: session by default, with explicit Local Project and All Outputs views. */}
+          <select
+            value={settings.gallerySource || 'session'}
+            onChange={(e) => {
+              updateSettings({ gallerySource: e.target.value as AppSettings['gallerySource'] });
+              setGalleryCurrentPage(1);
+            }}
+            className="px-2 py-0.5 bg-[#181a24] hover:bg-[#202431] border border-[#2b2f3a] text-indigo-200 rounded cursor-pointer transition text-[10px] font-mono outline-none"
+            title="Choose which image store this gallery displays"
           >
+            <option value="session">Session</option>
+            <option value="project">Local Project</option>
+            <option value="outputs">All Outputs</option>
+          </select>
 
-            Source: {settings.gallerySource === 'app' ? 'App Outputs' : 'All Server'}
-
-          </button>
 
 
-
-          <button
-
-            onClick={handleSyncServer}
-
-            disabled={isSyncingServer}
-
-            className="px-2 py-0.5 bg-[#181a24] hover:bg-amber-800 hover:text-white border border-[#2b2f3a] text-indigo-300 rounded cursor-pointer transition flex items-center gap-1 text-[10px]"
-
-          >
-
-            <RotateCw className={`w-3 h-3 ${isSyncingServer ? 'animate-spin' : ''}`} />
-
-            <span>{isSyncingServer ? 'Scanning...' : 'Sync'}</span>
-
-          </button>
+          {settings.gallerySource !== 'session' && (
+            <button
+              onClick={settings.gallerySource === 'project' ? () => void loadProjectGallery() : handleSyncServer}
+              disabled={isSyncingServer}
+              className="px-2 py-0.5 bg-[#181a24] hover:bg-amber-800 hover:text-white border border-[#2b2f3a] text-indigo-300 rounded cursor-pointer transition flex items-center gap-1 text-[10px]"
+            >
+              <RotateCw className={`w-3 h-3 ${isSyncingServer ? 'animate-spin' : ''}`} />
+              <span>{isSyncingServer ? 'Scanning...' : settings.gallerySource === 'outputs' ? 'Scan' : 'Reload'}</span>
+            </button>
+          )}
 
 
 
@@ -10134,6 +10823,15 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+          <button
+            type="button"
+            onClick={() => updateSettings({ galleryGroupByQueue: !settings.galleryGroupByQueue })}
+            className={`px-1.5 py-1 rounded cursor-pointer border transition text-[9px] font-mono flex items-center gap-1 ${settings.galleryGroupByQueue ? 'bg-indigo-500/15 text-indigo-200 border-indigo-400/30' : 'bg-[#181a20] text-gray-500 border-[#2b2f3a] hover:text-gray-300'}`}
+            title={settings.galleryGroupByQueue ? 'Ungroup queue batches' : 'Group images from the same queue/batch'}
+          >
+            <Network className="w-3 h-3" /> Group Queue
+          </button>
+
           {/* Page size limit */}
 
           <select
@@ -10141,11 +10839,12 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
             value={settings.galleryPageSize || 24}
 
             onChange={(e) => {
-
-              updateSettings({ galleryPageSize: Number(e.target.value) });
-
+              const nextSize = Number(e.target.value);
+              updateSettings({ galleryPageSize: nextSize });
               setGalleryCurrentPage(1);
-
+              if (settings.gallerySource === 'outputs') {
+                void syncServerGallery(true);
+              }
             }}
 
             className="bg-[#181a20] border border-[#2b2f3a] text-gray-300 text-[10px] rounded px-1 py-0.5 outline-none font-mono cursor-pointer"
@@ -10159,6 +10858,8 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
             <option value={48}>48 / p</option>
 
             <option value={96}>96 / p</option>
+
+            <option value={192}>192 / p</option>
 
           </select>
 
@@ -10240,26 +10941,24 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
       >
 
-        {paginatedItems.length === 0 ? (
-
-          <div className="col-span-full text-center py-8 text-gray-500 flex flex-col items-center gap-2">
-
-            <span>{gallerySearchQuery ? `No images match "${gallerySearchQuery}".` : 'No gallery images found for this view.'}</span>
-
-            <button
-
-              onClick={handleSyncServer}
-
-              className="px-3 py-1 bg-amber-800/30 hover:bg-amber-800 text-indigo-200 rounded text-xs transition cursor-pointer"
-
-            >
-
-              Scan Server Output Folder
-
-            </button>
-
+        {!currentOutputPageLoaded ? (
+          <div className="col-span-full flex flex-col items-center justify-center py-12 gap-3 text-zinc-500">
+            <RotateCw className="w-5 h-5 animate-spin text-amber-400" />
+            <span>Loading output page {safeCurrentPage}…</span>
+            <span className="text-[10px] text-zinc-700">{outputLoadedSet.size.toLocaleString()} of {outputTotalPages.toLocaleString()} pages cached</span>
           </div>
-
+        ) : paginatedItems.length === 0 ? (
+          <div className="col-span-full text-center py-8 text-gray-500 flex flex-col items-center gap-2">
+            <span>{gallerySearchQuery ? `No images match "${gallerySearchQuery}".` : settings.gallerySource === 'session' ? 'No generations have been created in this session.' : settings.gallerySource === 'project' ? 'The Local Project contains no embedded generations yet.' : 'No images were found in the configured output folder.'}</span>
+            {settings.gallerySource !== 'session' && (
+              <button
+                onClick={settings.gallerySource === 'project' ? () => { void loadProjectGallery(); } : handleSyncServer}
+                className="px-3 py-1 bg-amber-800/30 hover:bg-amber-800 text-indigo-200 rounded text-xs transition cursor-pointer"
+              >
+                {settings.gallerySource === 'project' ? 'Reload Local Project' : 'Scan Output Folder'}
+              </button>
+            )}
+          </div>
         ) : (
 
           paginatedItems.map((item, index) => {
@@ -10269,16 +10968,27 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
             const modelBaseName = (item.params?.model || 'unknown').split('/').pop()?.replace(/\.[^/.]+$/, '');
 
             const modelColor = getModelColorStyle(modelBaseName);
+            const queueKey = item.batchId || `single-${item.id}`;
+            const previousQueueKey = index > 0 ? (paginatedItems[index - 1].batchId || `single-${paginatedItems[index - 1].id}`) : null;
+            const showQueueHeader = settings.galleryGroupByQueue && queueKey !== previousQueueKey;
+            const queueCount = settings.galleryGroupByQueue ? paginatedItems.filter((entry) => (entry.batchId || `single-${entry.id}`) === queueKey).length : 0;
 
 
 
             return (
+              <React.Fragment key={`gallery-entry-${item.id || index}`}>
+                {showQueueHeader && (
+                  <div className="col-span-full w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-indigo-500/15 bg-indigo-500/5 text-[9px] font-mono">
+                    <span className="flex items-center gap-1.5 text-indigo-200"><Network className="w-3 h-3" /> Queue / Batch <span className="text-zinc-400">{queueKey}</span></span>
+                    <span className="text-zinc-500">{queueCount} image{queueCount === 1 ? '' : 's'} on this page</span>
+                  </div>
+                )}
 
               <div
 
                 key={item.id || index}
 
-                onClick={() => setParams({ activeImage: finalImageUrl })}
+                onClick={() => requestGenerationViewer(item)}
 
                 onContextMenu={(e) => handleGalleryContextMenu(e, item)}
 
@@ -10435,6 +11145,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
                 )}
 
               </div>
+              </React.Fragment>
 
             );
 
@@ -10447,49 +11158,88 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
 
       {/* Pagination Footer */}
-
       {totalPages > 1 && (
-
-        <div className="flex items-center justify-between pt-2 border-t border-[#252a35] text-[11px] font-mono shrink-0">
-
-          <span className="text-gray-400">Page {safeCurrentPage} of {totalPages}</span>
-
-          <div className="flex items-center gap-1">
-
-            <button
-
-              disabled={safeCurrentPage <= 1}
-
-              onClick={() => setGalleryCurrentPage(safeCurrentPage - 1)}
-
-              className="px-2 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
-
+        <div className="flex items-center justify-between pt-2 border-t border-[#252a35] text-[11px] font-mono shrink-0 gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-gray-400 whitespace-nowrap">Page</span>
+            <form
+              className="flex items-center gap-1"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void navigateOutputPage(Number(pageJumpValue));
+              }}
             >
-
-              Prev
-
-            </button>
-
-            <button
-
-              disabled={safeCurrentPage >= totalPages}
-
-              onClick={() => setGalleryCurrentPage(safeCurrentPage + 1)}
-
-              className="px-2 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
-
-            >
-
-              Next
-
-            </button>
-
+              <input
+                type="number"
+                min={1}
+                max={totalPages}
+                value={pageJumpValue}
+                onChange={(e) => setPageJumpValue(e.target.value)}
+                className="w-14 px-1.5 py-0.5 rounded bg-[#0d0e14] border border-[#2b2f3a] text-gray-200 text-center outline-none focus:border-amber-500/60"
+                aria-label="Gallery page number"
+              />
+              <span className="text-zinc-600 whitespace-nowrap">of {totalPages.toLocaleString()}</span>
+              <button
+                type="submit"
+                className="px-1.5 py-0.5 rounded border border-amber-500/25 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 cursor-pointer"
+                title="Jump to page"
+              >Go</button>
+            </form>
           </div>
 
+          <div className="flex items-center gap-1">
+            <button
+              disabled={safeCurrentPage <= 1}
+              onClick={() => void navigateOutputPage(1)}
+              className="px-1.5 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
+              title="First page"
+            >First</button>
+            <button
+              disabled={safeCurrentPage <= 1}
+              onClick={() => void navigateOutputPage(safeCurrentPage - 1)}
+              className="px-2 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
+            >Prev</button>
+
+            {(() => {
+              const pages = new Set<number>([1, totalPages, safeCurrentPage - 1, safeCurrentPage, safeCurrentPage + 1]);
+              const ordered = [...pages].filter((p) => p >= 1 && p <= totalPages).sort((a, b) => a - b);
+              const nodes: React.ReactNode[] = [];
+              ordered.forEach((page, index) => {
+                if (index > 0 && page - ordered[index - 1] > 1) {
+                  nodes.push(<span key={`gap-${page}`} className="px-1 text-zinc-700">…</span>);
+                }
+                nodes.push(
+                  <button
+                    key={page}
+                    onClick={() => void navigateOutputPage(page)}
+                    className={`min-w-7 px-1.5 py-0.5 rounded border cursor-pointer ${page === safeCurrentPage ? 'border-amber-500/40 bg-amber-500/15 text-amber-200' : 'border-[#2b2f3a] bg-[#181a20] text-gray-400 hover:bg-[#252a36] hover:text-white'}`}
+                  >{page}</button>
+                );
+              });
+              return nodes;
+            })()}
+
+            <button
+              disabled={safeCurrentPage >= totalPages}
+              onClick={() => void navigateOutputPage(safeCurrentPage + 1)}
+              className="px-2 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
+            >Next</button>
+            <button
+              disabled={safeCurrentPage >= totalPages}
+              onClick={() => void navigateOutputPage(totalPages)}
+              className="px-1.5 py-0.5 bg-[#181a20] hover:bg-[#252a36] disabled:opacity-40 border border-[#2b2f3a] rounded text-gray-300 cursor-pointer"
+              title="Last page"
+            >Last</button>
+          </div>
+
+          {isUnfilteredOutputView && (
+            <span className="text-[9px] text-zinc-600 whitespace-nowrap">
+              {outputLoadedSet.size.toLocaleString()} cached · {outputPagesRemaining.toLocaleString()} uncached
+              {isLoadingMoreOutputs ? ' · loading…' : ''}
+            </span>
+          )}
         </div>
-
       )}
-
 
 
       <MetadataModal
@@ -10502,7 +11252,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
 
       {lineageFocusId && (() => {
-        const focused = history.find((h) => h.id === lineageFocusId);
+        const focused = [...history, ...projectHistory, ...galleryHistory].find((h) => h.id === lineageFocusId);
         if (!focused) return null;
         const ancestors = getLineageAncestors(lineageFocusId);
         const children = getLineageChildren(lineageFocusId);
@@ -11496,29 +12246,26 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
     let nextList: string[];
 
     if (selectedTextEncoders.includes(teName)) {
-
       nextList = selectedTextEncoders.filter((item: string) => item !== teName);
-
     } else {
-
-      nextList = [...selectedTextEncoders, teName];
-
+      // SwarmCanvas exposes two encoder slots. Keep selection deterministic.
+      nextList = [...selectedTextEncoders, teName].slice(0, 2);
     }
 
-
-
     setParams({
-
       selectedTextEncoders: nextList,
-
       textEncoder: nextList[0] || 'Automatic',
-
       textEncoder2: nextList[1] || 'None',
-
     });
-
   };
 
+  const addCustomTextEncoder = () => {
+    const value = teSearchQuery.trim();
+    if (!value) return;
+    handleToggleTextEncoder(value);
+    setTeSearchQuery('');
+    setIsTeDropdownOpen(true);
+  };
 
 
   return (
@@ -11541,7 +12288,7 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
             <button
 
-              onClick={(e) => { e.stopPropagation(); loadAssets(); }}
+              onClick={(e) => { e.stopPropagation(); void loadAssets(true); }}
 
               className="p-1 hover:bg-white/10 rounded text-zinc-400 hover:text-cyan-300 transition"
 
@@ -11657,7 +12404,7 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 <div className="flex items-center justify-between text-[10px] text-zinc-400">
 
-                  <span>TEXT ENCODERS ({selectedTextEncoders.length} selected)</span>
+                  <span>{selectedTextEncoders.length > 0 ? `TEXT ENCODERS (${selectedTextEncoders.length} selected)` : 'TEXT ENCODER (AUTOMATIC)'}</span>
 
                   {selectedTextEncoders.length > 0 && (
 
@@ -11755,7 +12502,13 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
                     onFocus={() => setIsTeDropdownOpen(true)}
 
-                    placeholder={selectedTextEncoders.length === 0 ? "Select text encoders..." : ""}
+                    placeholder={selectedTextEncoders.length === 0 ? "Select a text encoder or type a filename…" : ""}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && teSearchQuery.trim()) {
+                        e.preventDefault();
+                        addCustomTextEncoder();
+                      }
+                    }}
 
                     className="flex-1 min-w-[80px] bg-transparent outline-none text-zinc-200 text-xs placeholder:text-zinc-500 font-mono px-1 py-0.5"
 
@@ -11773,6 +12526,11 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+                <div className="text-[10px] text-zinc-600 leading-relaxed px-1 pt-0.5">
+                  Manual selection is supported here. Common Anima/Qwen encoders are always available, even when SwarmUI does not expose a generic encoder parameter.
+                </div>
+
+
                 {/* Dropdown Menu Overlay */}
 
                 {isTeDropdownOpen && (
@@ -11781,15 +12539,9 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
                     {(() => {
 
-                      const allAvailable = Array.from(new Set([
-
-                        'qwen_3_06b_base.safetensors',
-
-                        'qwen35_4b.safetensors',
-
-                        ...textEncodersList.filter((t: string) => t !== 'Automatic' && t !== 'None')
-
-                      ]));
+                      const allAvailable = Array.from(new Set(
+                        textEncodersList.filter((t: string) => t !== 'Automatic' && t !== 'None')
+                      ));
 
 
 
@@ -11803,18 +12555,38 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       if (filtered.length === 0) {
 
+                        if (teSearchQuery.trim()) {
+                          return (
+                            <div className="p-2 font-mono">
+                              <button
+                                type="button"
+                                onClick={addCustomTextEncoder}
+                                className="w-full px-3 py-2 rounded-lg text-left text-xs text-cyan-200 bg-cyan-950/30 hover:bg-cyan-950/50 border border-cyan-500/20 transition"
+                              >
+                                <span className="block text-[10px] text-zinc-500 mb-0.5">Add manual encoder</span>
+                                <span className="block truncate">{teSearchQuery.trim()}</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setParams({ selectedTextEncoders: [], textEncoder: 'Automatic', textEncoder2: 'None' });
+                                  setTeSearchQuery('');
+                                }}
+                                className="w-full mt-1 px-3 py-1.5 rounded-lg text-[10px] text-zinc-400 hover:text-zinc-200 hover:bg-white/5 transition"
+                              >
+                                Use Automatic
+                              </button>
+                            </div>
+                          );
+                        }
+
                         return (
-
                           <div className="p-3 text-center text-zinc-500 text-xs font-mono">
-
-                            No matching text encoders found
-
+                            No text encoders are currently listed. Type a filename and press Enter to add one manually.
                           </div>
-
                         );
 
                       }
-
 
 
                       return filtered.map((te: string) => {
@@ -12217,6 +12989,9 @@ const components = {
   wildcardslot: withPanelBoundary('Wildcard Slots', WildcardSlotMachine),
 
   tagrarity: withPanelBoundary('Tag Rarity', TagRarityInspector),
+  promptpills: withPanelBoundary('Prompt Pills', PromptPillsPanel),
+  tagimages: withPanelBoundary('Tag Image Browser', TagImageBrowserPanel),
+  generationviewer: withPanelBoundary('Generation Viewer', GenerationViewerPanel),
 
 };
 
@@ -12303,7 +13078,7 @@ export const Workspace: React.FC = () => {
     document.documentElement.style.colorScheme = ['arctic', 'paper', 'nord', 'solarized'].includes(resolvedTheme) ? 'light' : 'dark';
   }, [fontScale, resolvedTheme]);
 
-  const queuedCount = queue.length + (activeJob ? 1 : 0);
+  const queuedCount = queue.filter((job: any) => job.status === 'queued').length + (activeJob ? 1 : 0);
 
   const modelCount = modelsList.length;
 
@@ -12332,78 +13107,44 @@ export const Workspace: React.FC = () => {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   const [isReconnecting, setIsReconnecting] = useState(false);
-
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastConnectionProbeRef = useRef(0);
+  const backendWasOfflineRef = useRef(false);
 
-
-
-  const probeConnection = async () => {
-
-    if (isReconnecting) return;
-
+  const probeConnection = useCallback(async () => {
+    const now = Date.now();
+    if (isReconnecting || now - lastConnectionProbeRef.current < 30000) return;
+    lastConnectionProbeRef.current = now;
     setIsReconnecting(true);
-
-    emitDiagnostic({ level: 'info', scope: 'connection', message: 'Checking backend connection after focus/network activity.' });
-
     try {
-
       const healthy = await swarmClient.testConnection();
-
+      const wasOffline = backendWasOfflineRef.current;
       useAppStore.setState({ isConnected: healthy });
-
-      if (healthy) {
-
-        emitToast('Backend connection restored', 'success');
-
+      backendWasOfflineRef.current = !healthy;
+      if (!healthy) {
+        emitDiagnostic({ level: 'warn', scope: 'connection', message: 'SwarmUI backend is currently unavailable.' });
+      } else if (wasOffline) {
         void useAppStore.getState().loadAssets();
-
-      } else {
-
-        emitToast('Backend is still unavailable', 'warning');
-
       }
-
     } finally {
-
       setIsReconnecting(false);
-
     }
-
-  };
-
-
+  }, [isReconnecting]);
 
   useEffect(() => {
-
     const onWake = () => {
-
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-
-      reconnectTimerRef.current = setTimeout(() => void probeConnection(), 350);
-
+      reconnectTimerRef.current = setTimeout(() => { void probeConnection(); }, 350);
     };
-
-    const onVisibilityChange = () => { if (document.visibilityState === 'visible') onWake(); };
-
+    const onOnline = () => { lastConnectionProbeRef.current = 0; onWake(); };
+    window.addEventListener('online', onOnline);
     window.addEventListener('focus', onWake);
-
-    window.addEventListener('online', onWake);
-
-    document.addEventListener('visibilitychange', onVisibilityChange);
-
     return () => {
-
+      window.removeEventListener('online', onOnline);
       window.removeEventListener('focus', onWake);
-
-      window.removeEventListener('online', onWake);
-
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-
     };
-
-  }, [isReconnecting]);
+  }, [probeConnection]);
 
   const [toasts, setToasts] = useState<Array<{ id: number; message: string; tone: 'success' | 'info' | 'warning' | 'error' }>>([]);
 
@@ -12553,11 +13294,60 @@ export const Workspace: React.FC = () => {
 
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
 
+  useEffect(() => {
+    if (!dockApi) return;
+    const openGenerationViewerPanel = () => {
+      try {
+        const existing = (dockApi as any).getPanel?.('generationviewer_panel');
+        if (existing) {
+          try { (existing.api as any)?.setActive?.(); } catch {}
+          return;
+        }
+        const panel = dockApi.addPanel({
+          id: 'generationviewer_panel',
+          component: 'generationviewer',
+          title: 'Generation Viewer',
+          position: { referencePanel: 'preview_panel', direction: 'within' },
+        });
+        try { (panel.api as any)?.setActive?.(); } catch {}
+      } catch (error) {
+        console.error('[Workspace] Could not open Generation Viewer:', error);
+        emitToast(`Could not open Generation Viewer: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      }
+    };
+    window.addEventListener('swarm-open-generation-viewer', openGenerationViewerPanel);
+    return () => window.removeEventListener('swarm-open-generation-viewer', openGenerationViewerPanel);
+  }, [dockApi]);
+
   const [isTopBarCollapsed, setIsTopBarCollapsed] = useState(false);
 
   const [showAddMenu, setShowAddMenu] = useState(false);
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [localProjectLocation, setLocalProjectLocation] = useState('');
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'general' | 'gallery' | 'generation' | 'prompt' | 'workspace'>('general');
+
+  useEffect(() => {
+    void getLocalProjectLocation(settings.localProjectPath).then((location) => {
+      if (location) setLocalProjectLocation(location);
+    }).catch(() => {});
+  }, [settings.localProjectPath]);
+
+  const handleChooseLocalProjectLocation = async () => {
+    try {
+      const selected = await chooseLocalProjectLocation(settings.localProjectPath || localProjectLocation);
+      if (!selected) return;
+      updateSettings({ localProjectPath: selected });
+      setLocalProjectLocation(selected);
+      // Refresh immediately when the Local Project gallery is currently visible.
+      if (settings.gallerySource === 'project') {
+        void useAppStore.getState().loadProjectGallery();
+      }
+      emitToast(`Local Project folder set to ${selected}`, 'success');
+    } catch (error) {
+      emitToast(`Could not choose Local Project folder: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+  };
 
   const [activeScaleSection, setActiveScaleSection] = useState<keyof AppSettings['sectionScales']>('pills');
 
@@ -12631,7 +13421,7 @@ export const Workspace: React.FC = () => {
 
           icon: <RotateCw className="w-3.5 h-3.5" />,
 
-          action: () => useAppStore.getState().loadAssets()
+          action: () => void useAppStore.getState().loadAssets(true)
 
         }
 
@@ -12887,14 +13677,17 @@ export const Workspace: React.FC = () => {
 
     { id: 'toggle-queue', label: queue.length ? 'Open queue controls' : 'Open queue', description: 'Manage, reorder and edit generation jobs', icon: defaultCommandIcons.pause, action: () => window.dispatchEvent(new CustomEvent('swarm-open-queue')) },
 
-    { id: 'refresh', label: 'Reload asset catalogs', description: 'Refresh models, LoRAs, embeddings and metadata', icon: defaultCommandIcons.refresh, action: () => void useAppStore.getState().loadAssets() },
+    { id: 'refresh', label: 'Reload asset catalogs', description: 'Refresh models, LoRAs, embeddings and metadata', icon: defaultCommandIcons.refresh, action: () => void useAppStore.getState().loadAssets(true) },
 
     { id: 'models', label: 'Open Extra Networks', description: 'Browse models, LoRAs, embeddings and wildcards', icon: defaultCommandIcons.models, action: () => addPanel('extranetworks', 'Extra Networks') },
+
+    { id: 'prompt-pills-popout', label: 'Open Prompt Pills popup', description: 'Open Prompt Pills in a separate window', icon: defaultCommandIcons.models, action: () => void openPromptPillsPopup() },
 
     { id: 'civitai-library', label: 'Open Civitai Library', description: 'Inspect metadata health, unresolved assets and cached previews', icon: defaultCommandIcons.models, action: () => addPanel('civitailibrary', 'Civitai Library') },
     { id: 'studio-tools', label: 'Open Studio Tools', description: 'Generation matrix, image guidance, prompt syntax, metadata and variations', icon: defaultCommandIcons.models, action: () => addPanel('studioutils', 'Studio Tools') },
 
     { id: 'history', label: 'Open History', description: 'Browse recent generations', icon: defaultCommandIcons.history, action: () => addPanel('history', 'Output History') },
+    { id: 'generation-viewer', label: 'Open Generation Viewer', description: 'Inspect a generation image and its metadata', icon: defaultCommandIcons.history, action: () => addPanel('generationviewer', 'Generation Viewer') },
 
     { id: 'settings', label: 'Open settings', description: 'Preferences and persistence controls', icon: defaultCommandIcons.settings, action: () => setShowSettingsModal(true) },
     { id: 'shortcuts', label: 'Keyboard shortcuts', description: 'View all keyboard and mouse shortcuts', icon: defaultCommandIcons.settings, action: () => setShowShortcutsModal(true) },
@@ -13304,11 +14097,22 @@ export const Workspace: React.FC = () => {
                     <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Gallery
 
                   </button>
+                  <button onClick={() => addPanel('generationviewer', 'Generation Viewer')} className="px-3 py-1.5 text-left hover:bg-amber-800 hover:text-white flex items-center gap-2 cursor-pointer">
+
+                    <Info className="w-3.5 h-3.5 text-amber-300" /> Generation Viewer
+
+                  </button>
 
                   <button onClick={() => addPanel('imagesearch', 'Image Search')} className="px-3 py-1.5 text-left hover:bg-amber-800 hover:text-white flex items-center gap-2 cursor-pointer">
 
                     <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Image Search
 
+                  </button>
+                  <button onClick={() => addPanel('promptpills', 'Prompt Pills')} className="px-3 py-1.5 text-left hover:bg-amber-800 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Type className="w-3.5 h-3.5 text-cyan-300" /> Prompt Pills
+                  </button>
+                  <button onClick={() => addPanel('tagimages', 'Tag Image Browser')} className="px-3 py-1.5 text-left hover:bg-amber-800 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <ImageIcon className="w-3.5 h-3.5 text-violet-300" /> Tag Image Browser
                   </button>
 
                   <div className="h-px bg-white/10 my-1" />
@@ -13605,427 +14409,203 @@ export const Workspace: React.FC = () => {
 
 
       {/* Settings Modal */}
-
       {showSettingsModal && (
-
-        <div className="fixed inset-0 z-999999 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sc-settings-modal-backdrop">
-
-          <div className="w-120 max-h-[85vh] overflow-y-auto bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 text-xs text-gray-200 flex flex-col gap-3 sc-settings-modal">
-
-            <div className="flex justify-between items-center border-b border-[#252a38] pb-2 font-semibold text-sm text-indigo-400">
-
-              <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Preferences & Customization</span>
-
-              <button onClick={() => setShowSettingsModal(false)} className="text-gray-500 hover:text-white text-base">✕</button>
-
-            </div>
-
-
-
-            <div className="sc-settings-section">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="sc-settings-section-title">Interface Font Scale</div>
-                  <div className="sc-settings-help">Scales interface text across the workspace without changing generation parameters or image dimensions.</div>
+        <div className="fixed inset-0 z-999999 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 sc-settings-modal-backdrop">
+          <div
+            className="w-[min(980px,calc(100vw-32px))] max-h-[90vh] overflow-hidden bg-[#161822] border border-[#33384c] rounded-2xl shadow-2xl text-sm text-gray-200 flex flex-col sc-settings-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-[#2a2f40] flex items-center justify-between shrink-0">
+              <div>
+                <div className="flex items-center gap-2 text-base font-semibold text-gray-100">
+                  <Settings className="w-5 h-5 text-amber-400" /> Preferences & Customization
                 </div>
-                <InfoPopover content="This setting scales the UI typography globally, including compact labels and controls that use fixed pixel sizes." side="left" />
+                <div className="text-xs text-zinc-500 mt-1">Generation, gallery, storage, interface and behavior controls.</div>
               </div>
-              <div className="flex items-center gap-3">
-                <input
-                  type="range"
-                  min="80"
-                  max="140"
-                  step="5"
-                  value={fontScale}
-                  onChange={(e) => updateSettings({ fontScale: Number(e.target.value) })}
-                  className="sc-settings-range flex-1"
-                  aria-label="Interface font scale"
-                />
-                <span className="sc-settings-value">{fontScale}%</span>
-                <button type="button" className="sc-settings-reset" onClick={() => updateSettings({ fontScale: 100 })}>Reset</button>
+              <button type="button" onClick={() => setShowSettingsModal(false)} className="w-9 h-9 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white text-lg cursor-pointer">✕</button>
+            </div>
+
+            <div className="flex min-h-0 flex-1">
+              <aside className="w-52 shrink-0 border-r border-[#2a2f40] bg-[#12141c] p-3 overflow-y-auto">
+                <div className="text-[10px] uppercase tracking-[0.18em] text-zinc-600 px-3 pb-2">Settings</div>
+                {([
+                  ['general', 'Appearance', Palette],
+                  ['gallery', 'Gallery & Storage', ImageIcon],
+                  ['generation', 'Generation', Wand2],
+                  ['prompt', 'Prompt & Tags', Type],
+                  ['workspace', 'Workspace', LayoutGrid],
+                ] as const).map(([id, label, Icon]) => (
+                  <button
+                    type="button"
+                    key={id}
+                    onClick={() => setActiveSettingsTab(id)}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left mb-1 cursor-pointer transition ${activeSettingsTab === id ? 'bg-amber-500/12 text-amber-200 border border-amber-500/25' : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/5 border border-transparent'}`}
+                  >
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span className="font-medium">{label}</span>
+                  </button>
+                ))}
+              </aside>
+
+              <div className="flex-1 min-w-0 overflow-y-auto p-5 space-y-4">
+                {activeSettingsTab === 'general' && (
+                  <>
+                    <div className="sc-settings-section">
+                      <div className="flex items-center justify-between gap-4 mb-3">
+                        <div><div className="text-base font-semibold text-gray-100">Appearance</div><div className="text-xs text-zinc-500">Customize the visual density and color system.</div></div>
+                        <InfoPopover content="Appearance settings affect the interface only; they never modify generated image parameters." side="left" />
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <label className="sc-setting-card">
+                          <span className="sc-setting-label">Theme</span>
+                          <select value={resolvedTheme} onChange={(e) => updateSettings({ uiTheme: e.target.value as AppSettings['uiTheme'] })} className="sc-setting-control">
+                            <option value="obsidian">Obsidian — black / champagne</option><option value="arctic">Arctic — cool light / steel</option><option value="paper">Paper — warm light / ink</option><option value="terminal">Terminal — black / green</option><option value="midnight">Midnight — navy / steel</option><option value="forest">Forest — charcoal / sage</option><option value="clay">Clay — terracotta / parchment</option><option value="mono">Monochrome — grayscale</option><option value="contrast">High Contrast — black / white</option><option value="nord">Nord — pale slate / blue</option><option value="dracula">Dracula — plum / lavender</option><option value="solarized">Solarized — parchment / gold</option><option value="rose">Rose — charcoal / dusty rose</option><option value="coffee">Coffeehouse — espresso / copper</option><option value="matrix">Matrix — black / green</option><option value="sunset">Sunset — plum / peach</option>
+                          </select>
+                        </label>
+                        <div className="sc-setting-card">
+                          <div className="flex items-center justify-between"><span className="sc-setting-label">Interface font scale</span><span className="text-sm font-mono text-amber-200">{fontScale}%</span></div>
+                          <input type="range" min="80" max="140" step="5" value={fontScale} onChange={(e) => updateSettings({ fontScale: Number(e.target.value) })} className="w-full accent-amber-500" />
+                          <div className="flex justify-between text-[11px] text-zinc-600"><span>80%</span><span>100% default</span><span>140%</span></div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="sc-settings-section">
+                      <div className="text-base font-semibold text-gray-100 mb-3">Presets & Model Behavior</div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <label className="sc-setting-card"><span className="sc-setting-label">Startup layout preset</span><select value={settings.activePreset} onChange={(e) => applyLayoutPreset(e.target.value as AppSettings['activePreset'])} className="sc-setting-control"><option>Default</option><option>Prompt Engineer</option><option>Studio Canvas</option><option>Multi-ControlNet</option></select></label>
+                        <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Auto-apply model-linked prompt preset</span><span className="sc-setting-help">Changing models can apply the preset linked to that model.</span></span><input type="checkbox" checked={settings.autoApplyModelPreset} onChange={(e) => updateSettings({ autoApplyModelPreset: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {activeSettingsTab === 'gallery' && (
+                  <>
+                    <div className="sc-settings-section">
+                      <div className="flex items-center justify-between gap-4 mb-3"><div><div className="text-base font-semibold text-gray-100">Gallery Source</div><div className="text-xs text-zinc-500">Session is the normal view. Other sources are explicit opt-in views.</div></div><InfoPopover content="Current Session contains only generations created since this application launch. Local Project reads files stored by SwarmCanvas inside the folder selected under Local Project Storage. All Outputs recursively reads the Stability Matrix Images tree, including Text2Img, Img2Img, grids, SVD, Saved, Extras, and Starred folders." side="left" /></div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <label className="sc-setting-card"><span className="sc-setting-label">Default gallery source</span><select value={settings.gallerySource || 'session'} onChange={(e) => updateSettings({ gallerySource: e.target.value as AppSettings['gallerySource'] })} className="sc-setting-control"><option value="session">Current Session</option><option value="project">Local Project</option><option value="outputs">All Outputs</option></select></label>
+                        <label className="sc-setting-card"><span className="sc-setting-label">Images per gallery page</span><select value={settings.galleryPageSize || 24} onChange={(e) => updateSettings({ galleryPageSize: Number(e.target.value) })} className="sc-setting-control"><option value="12">12</option><option value="24">24</option><option value="48">48</option><option value="96">96</option><option value="192">192</option></select></label>
+                      </div>
+                    </div>
+
+                    <div className="sc-settings-section">
+                      <div className="text-base font-semibold text-gray-100 mb-3">Local Project Storage</div>
+                      <label className="sc-setting-card sc-toggle-card mb-3"><span><span className="sc-setting-label">Store outputs on Local Project</span><span className="sc-setting-help">When enabled, completed SwarmCanvas generations are copied into the selected Local Project folder. The source is kept in Stability Matrix until the local copy and metadata write succeed; only then is the original requested for deletion. When disabled, outputs stay in their normal Stability Matrix / SwarmUI folders.</span></span><input type="checkbox" checked={settings.saveGeneratedImagesToProject} onChange={(e) => updateSettings({ saveGeneratedImagesToProject: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="sc-setting-card"><span className="sc-setting-label">Project image format</span><select disabled={!settings.saveGeneratedImagesToProject} value={settings.projectImageFormat || 'jpg'} onChange={(e) => updateSettings({ projectImageFormat: e.target.value as AppSettings['projectImageFormat'] })} className="sc-setting-control"><option value="original">Original (keep source format)</option><option value="jpg">JPG</option><option value="jpeg">JPEG</option><option value="png">PNG (lossless)</option><option value="webp">WebP</option></select><span className="text-[11px] text-zinc-600">Original keeps PNG/JPEG/WebP without re-encoding. PNG is lossless; JPG/JPEG and WebP can use quality compression.</span></label>
+                        <label className="sc-setting-card"><span className="sc-setting-label">Maximum image dimension</span><select disabled={!settings.saveGeneratedImagesToProject || settings.projectImageFormat === 'original'} value={settings.projectJpegMaxDimension} onChange={(e) => updateSettings({ projectJpegMaxDimension: Number(e.target.value) })} className="sc-setting-control"><option value="0">Original size</option><option value="512">512 px</option><option value="768">768 px</option><option value="1024">1024 px</option><option value="1536">1536 px</option><option value="2048">2048 px</option><option value="3072">3072 px</option><option value="4096">4096 px</option></select><span className="text-[11px] text-zinc-600">Downscales encoded copies before writing; Original keeps the source dimensions unchanged.</span></label>
+                        <label className="sc-setting-card"><div className="flex items-center justify-between"><span className="sc-setting-label">Image quality</span><span className="text-sm font-mono text-amber-200">{settings.projectJpegQuality}</span></div><input type="range" min="60" max="100" step="1" value={settings.projectJpegQuality} onChange={(e) => updateSettings({ projectJpegQuality: Number(e.target.value) })} className="w-full accent-amber-500" disabled={!settings.saveGeneratedImagesToProject || settings.projectImageFormat === 'png' || settings.projectImageFormat === 'original'} /><span className="text-[11px] text-zinc-600">Used by JPG/JPEG and WebP. PNG is lossless and ignores this value.</span></label>
+                        <label className="sc-setting-card"><span className="sc-setting-label">JPEG transparency fallback</span><select value={settings.projectJpegBackground} onChange={(e) => updateSettings({ projectJpegBackground: e.target.value as AppSettings['projectJpegBackground'] })} className="sc-setting-control" disabled={!settings.saveGeneratedImagesToProject || settings.projectImageFormat === 'png' || settings.projectImageFormat === 'webp' || settings.projectImageFormat === 'original'}><option value="black">Black background</option><option value="white">White background</option></select><span className="text-[11px] text-zinc-600">Only applies to JPG/JPEG because they do not support alpha.</span></label>
+                        <label className="sc-setting-card"><span className="sc-setting-label">Filename prefix</span><input disabled={!settings.saveGeneratedImagesToProject} value={settings.projectJpegFilenamePrefix} onChange={(e) => updateSettings({ projectJpegFilenamePrefix: e.target.value.slice(0, 48) })} className="sc-setting-control font-mono" placeholder="SwarmCanvas" spellCheck={false} /><span className="text-[11px] text-zinc-600">Files are stored under Text2Img/local/raw/YYYY-MM-DD inside your selected Local Project folder.</span></label>
+                      </div>
+                      <div className="mt-3 rounded-xl bg-black/20 border border-white/10 px-3 py-3 text-xs text-zinc-500">
+                        <div className="text-zinc-400 mb-2">Local Project root</div>
+                        <div className="flex gap-2 mb-3">
+                          <input disabled={!settings.saveGeneratedImagesToProject} value={settings.localProjectPath} onChange={(e) => { updateSettings({ localProjectPath: e.target.value }); setLocalProjectLocation(e.target.value); }} placeholder="C:\Users\you\Pictures\SwarmCanvas" className="sc-setting-control font-mono flex-1" spellCheck={false} />
+                          <button type="button" disabled={!settings.saveGeneratedImagesToProject} onClick={() => void handleChooseLocalProjectLocation()} className="px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 hover:bg-amber-500/15 text-amber-200 cursor-pointer">Browse…</button>
+                        </div>
+                        <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><span className="text-zinc-400">Local Project output folder:</span><div className="mt-1 font-mono text-[11px] text-zinc-300 break-all">{localProjectLocation || 'Default Local Project folder'}</div><div className="mt-1 text-[11px] text-zinc-600">Choose exactly where SwarmCanvas-owned generations should live. The app creates its own dated subfolders underneath this location. This setting does not change where SwarmUI stores outputs when the toggle above is disabled.</div></div><div className="shrink-0 flex gap-2"><button type="button" disabled={!settings.saveGeneratedImagesToProject || !localProjectLocation} onClick={() => { if (localProjectLocation) void swarmClient.revealFilesystemPath(localProjectLocation); }} className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Open</button></div></div><div className="mt-2 flex gap-2"><button type="button" disabled={!settings.saveGeneratedImagesToProject} onClick={() => { updateSettings({ localProjectPath: '' }); void getLocalProjectLocation('').then((location) => { if (location) setLocalProjectLocation(location); }); }} className="px-2.5 py-1.5 rounded-lg border border-white/8 bg-white/3 hover:bg-white/6 text-zinc-500 hover:text-zinc-300 cursor-pointer">Use SwarmCanvas default</button><span className="text-[11px] text-zinc-700 self-center">Stored files remain ordinary images with embedded metadata.</span></div></div>
+                    </div>
+
+                    <div className="sc-settings-section">
+                      <div className="text-base font-semibold text-gray-100 mb-3">All Outputs</div>
+                      <div className="flex gap-2 mb-3"><input value={settings.outputFolderPath} onChange={(e) => updateSettings({ outputFolderPath: e.target.value })} placeholder="C:\\SM\\Data\\Packages\\ComfyUI\\output" className="sc-setting-control font-mono flex-1" spellCheck={false} /><button type="button" onClick={() => updateSettings({ outputFolderPath: '' })} className="px-4 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300 cursor-pointer">Auto-detect</button></div>
+                      <div className="text-xs text-zinc-500">All Outputs recursively scans the entire Stability Matrix image tree. Auto-detect uses C:\SM\Data\Images first, so Text2Img, Img2Img, Img2ImgGrids, Text2ImgGrids, SVD, Saved, Extras, Starred, dated raw folders, and their nested subfolders are all included. The scan is not limited to SwarmUI's history count and does not use the ListImages history endpoint.</div>
+                    </div>
+
+                    <div className="sc-settings-section">
+                      <div className="text-base font-semibold text-gray-100 mb-3">History Limits</div>
+                      <label className="sc-setting-card"><div className="flex items-center justify-between"><span className="sc-setting-label">Maximum in-memory session/gallery history</span><span className="text-sm font-mono text-amber-200">{settings.maxHistoryCount.toLocaleString()}</span></div><input type="range" min="100" max="20000" step="100" value={settings.maxHistoryCount} onChange={(e) => updateSettings({ maxHistoryCount: Number(e.target.value) })} className="w-full accent-amber-500" /><div className="flex justify-between text-[11px] text-zinc-600"><span>100</span><span>5,000 default</span><span>20,000</span></div></label>
+                    </div>
+                  </>
+                )}
+
+                {activeSettingsTab === 'generation' && (
+                  <>
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Generation Defaults</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Randomize seed on new generation</span><span className="sc-setting-help">Keeps ordinary Generate actions from repeatedly using the same seed.</span></span><input type="checkbox" checked={settings.randomizeSeedOnGen} onChange={(e) => updateSettings({ randomizeSeedOnGen: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Automatically show newest completed image</span><span className="sc-setting-help">Updates the viewport when a generation completes.</span></span><input type="checkbox" checked={settings.autoSwapToLatest} onChange={(e) => updateSettings({ autoSwapToLatest: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Keep separate batch groups</span><span className="sc-setting-help">Preserves batch IDs when generations are queued together.</span></span><input type="checkbox" checked={settings.separateBatches} onChange={(e) => updateSettings({ separateBatches: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card"><span className="sc-setting-label">Default LoRA weight</span><input type="number" min="0.05" max="3" step="0.05" value={settings.defaultLoraWeight ?? 1} onChange={(e) => updateSettings({ defaultLoraWeight: Math.max(0.05, Math.min(3, Number(e.target.value) || 1)) })} className="sc-setting-control" /></label>
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Queue & Progress</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Hide generation progress bar</span><span className="sc-setting-help">Keeps the viewport visually cleaner during long renders.</span></span><input type="checkbox" checked={settings.hideProgressBar} onChange={(e) => updateSettings({ hideProgressBar: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Auto-resume queue after crash/reload</span><span className="sc-setting-help">Recovered queued jobs start automatically on launch.</span></span><input type="checkbox" checked={settings.autoResumeQueueOnLaunch} onChange={(e) => updateSettings({ autoResumeQueueOnLaunch: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Save ADetailer base + final passes</span><span className="sc-setting-help">Adds the pre-ADetailer output to history when that pipeline is enabled.</span></span><input type="checkbox" checked={settings.saveBeforeAfterADetailer} onChange={(e) => updateSettings({ saveBeforeAfterADetailer: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Notifications & Metadata</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Play completion sound</span><span className="sc-setting-help">Uses the configured completion sound when available.</span></span><input type="checkbox" checked={settings.playCompletionSound} onChange={(e) => updateSettings({ playCompletionSound: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Automatic Civitai metadata scan</span><span className="sc-setting-help">Attempts metadata matching when model assets are loaded.</span></span><input type="checkbox" checked={settings.autoCivitaiScan} onChange={(e) => updateSettings({ autoCivitaiScan: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                    </div></div>
+                  </>
+                )}
+
+                {activeSettingsTab === 'prompt' && (
+                  <>
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Tag Database</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card"><span className="sc-setting-label">Categorization engine</span><select value={settings.categorizationMode || 'prompt_flow'} onChange={async (e) => { const mode = e.target.value as AppSettings['categorizationMode']; updateSettings({ categorizationMode: mode }); await danbooru.setCategorizationMode(mode); useAppStore.getState().setActiveMacroCategory('All'); useAppStore.getState().setActiveSubCategory('All'); }} className="sc-setting-control"><option value="prompt_flow">Prompt-Flow Pipeline</option><option value="danbooru_types">Danbooru Official Types</option><option value="danbooru_groups">Danbooru Wiki Tag Groups</option></select></label>
+                      <label className="sc-setting-card"><span className="sc-setting-label">Tag sorting order</span><select value={settings.tagSortOrder || 'alphabetical'} onChange={async (e) => { const sort = e.target.value as AppSettings['tagSortOrder']; updateSettings({ tagSortOrder: sort }); await danbooru.setSortMode(sort); }} className="sc-setting-control"><option value="alphabetical">A–Z Alphabetical</option><option value="popularity">Popularity / Post Count</option></select></label>
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Prompt Insertion</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {([
+                        { key: 'autoInjectLoraTrigger', label: 'Auto-inject LoRA activation words' },
+                        { key: 'autoInjectModelKeywords', label: 'Auto-inject model keywords' },
+                        { key: 'showTagPlusPrefix', label: "Show '+' before tag labels" },
+                        { key: 'showTagPostCounts', label: 'Show post count badges on pills' },
+                        { key: 'useUnderscores', label: 'Use underscores in tag text' },
+                      ] as const).map(({ key, label }) => <label key={key} className="sc-setting-card sc-toggle-card"><span className="sc-setting-label">{label}</span><input type="checkbox" checked={settings[key]} onChange={(e) => updateSettings({ [key]: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>)}
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Prompt Weight Controls</div><label className="sc-setting-card"><div className="flex items-center justify-between"><span className="sc-setting-label">Tag click / wheel weight step</span><span className="text-sm font-mono text-amber-200">{settings.tagClickWeightStep}</span></div><input type="range" min="0.05" max="0.5" step="0.05" value={settings.tagClickWeightStep} onChange={(e) => updateSettings({ tagClickWeightStep: Number(e.target.value) })} className="w-full accent-amber-500" /></label></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Prompt Section Editor</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Hide inline LoRA pills</span><span className="sc-setting-help">Keeps LoRAs in the prompt string but manages them from the dedicated LoRA strip above each box.</span></span><input type="checkbox" checked={settings.hideInlineLorasInPromptBoxes !== false} onChange={(e) => updateSettings({ hideInlineLorasInPromptBoxes: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show section headers</span><span className="sc-setting-help">Displays a compact header for every newline-delimited prompt section with focus and editing actions.</span></span><input type="checkbox" checked={settings.showPromptSectionHeaders !== false} onChange={(e) => updateSettings({ showPromptSectionHeaders: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show section statistics</span><span className="sc-setting-help">Shows tag count, character count, and LoRA count in section headers on larger panels.</span></span><input type="checkbox" checked={settings.showPromptSectionStats !== false} onChange={(e) => updateSettings({ showPromptSectionStats: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show selection toolbar</span><span className="sc-setting-help">Shows bulk weight, mute, move, copy, section, and delete controls when tags are selected.</span></span><input type="checkbox" checked={settings.showPromptSelectionToolbar !== false} onChange={(e) => updateSettings({ showPromptSelectionToolbar: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Enable SwarmUI syntax quick insert</span><span className="sc-setting-help">Adds one-click Random, Alternate, From-To, Wildcard, Repeat, Embed, Comment, and Param snippets.</span></span><input type="checkbox" checked={settings.promptSyntaxQuickInsert !== false} onChange={(e) => updateSettings({ promptSyntaxQuickInsert: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Double-click edits prompt pills</span><span className="sc-setting-help">Double-click enters text editing. Use the right-click menu to disable/comment a tag.</span></span><input type="checkbox" checked={settings.doubleClickEditPromptPills !== false} onChange={(e) => updateSettings({ doubleClickEditPromptPills: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                    </div></div>
+                  </>
+                )}
+
+                {activeSettingsTab === 'workspace' && (
+                  <>
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Workspace State</div><div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Preserve prompts & parameters on reload</span></span><input type="checkbox" checked={settings.preservePromptsOnReload} onChange={(e) => updateSettings({ preservePromptsOnReload: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Auto-save Dockview panel layout</span></span><input type="checkbox" checked={settings.autoSaveLayout} onChange={(e) => updateSettings({ autoSaveLayout: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Panel View Modes</div><div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {(['extraNetworks','history','gallery'] as const).map((panel) => <label key={panel} className="sc-setting-card"><span className="sc-setting-label">{panel === 'extraNetworks' ? 'Extra Networks' : panel[0].toUpperCase() + panel.slice(1)}</span><select value={settings.panelViewModes?.[panel] || 'cards'} onChange={(e) => updateSettings({ panelViewModes: { ...settings.panelViewModes, [panel]: e.target.value as 'cards' | 'compact' | 'list' } })} className="sc-setting-control"><option value="cards">Cards</option><option value="compact">Compact</option><option value="list">List</option></select></label>)}
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Section Density</div><div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {(Object.keys(settings.sectionScales) as Array<keyof AppSettings['sectionScales']>).map((section) => <label key={section} className="sc-setting-card"><div className="flex items-center justify-between"><span className="sc-setting-label">{section}</span><span className="text-sm font-mono text-amber-200">{settings.sectionScales[section]}%</span></div><input type="range" min="80" max="130" step="5" value={settings.sectionScales[section]} onChange={(e) => setSectionScale(section, Number(e.target.value))} className="w-full accent-amber-500" /></label>)}
+                    </div></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Panel Size</div><label className="sc-setting-card"><div className="flex items-center justify-between"><span className="sc-setting-label">Bottom tray height</span><span className="text-sm font-mono text-amber-200">{settings.bottomPanelHeight}px</span></div><input type="range" min="220" max="620" step="10" value={settings.bottomPanelHeight} onChange={(e) => updateSettings({ bottomPanelHeight: Number(e.target.value) })} className="w-full accent-amber-500" /></label></div>
+
+                    <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Completion Sound</div><div className="flex flex-wrap items-center gap-3"><label className="sc-setting-card flex-1 min-w-[260px]"><span className="sc-setting-label">Custom completion sound</span><input type="file" accept="audio/*" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => updateSettings({ completionSoundData: String(reader.result || '') }); reader.readAsDataURL(file); }} className="block w-full text-xs text-zinc-400 file:mr-3 file:rounded-lg file:border-0 file:bg-white/10 file:px-3 file:py-2 file:text-zinc-200 file:cursor-pointer cursor-pointer" /></label>{settings.completionSoundData && <button type="button" onClick={() => updateSettings({ completionSoundData: null })} className="px-4 py-2.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300 cursor-pointer">Clear custom sound</button>}</div></div>
+
+                    <div className="sc-settings-section"><div className="flex items-center justify-between gap-3"><div><div className="text-base font-semibold text-gray-100">Reset</div><div className="text-xs text-zinc-500">Removes persisted interface state and reloads the application.</div></div><button type="button" onClick={() => { localStorage.removeItem('swarm_canvas_persisted_store'); localStorage.removeItem('swarm_dockview_layout'); window.location.reload(); }} className="px-4 py-2.5 rounded-xl bg-rose-950/60 border border-rose-700/70 text-rose-200 hover:bg-rose-900/60 cursor-pointer">Reset Stored State & Layout</button></div></div>
+                  </>
+                )}
               </div>
             </div>
 
-            <div className="sc-settings-section">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="sc-settings-section-title">Appearance Theme</div>
-                  <div className="sc-settings-help">Obsidian is the default. Additional themes intentionally change the surface, contrast and accent system.</div>
-                </div>
-                <InfoPopover content="Changes the application color system only; generation parameters and saved images are unaffected." side="left" />
-              </div>
-              <select
-                value={resolvedTheme}
-                onChange={(e) => updateSettings({ uiTheme: e.target.value as AppSettings['uiTheme'] })}
-                className="sc-settings-theme-select"
-                aria-label="Appearance theme"
-              >
-                <option value="obsidian">Obsidian — black / champagne</option>
-                <option value="arctic">Arctic — cool light / steel</option>
-                <option value="paper">Paper — warm light / ink</option>
-                <option value="terminal">Terminal — black / green</option>
-                <option value="midnight">Midnight — navy / steel</option>
-                <option value="forest">Forest — charcoal / sage</option>
-                <option value="clay">Clay — terracotta / parchment</option>
-                <option value="mono">Monochrome — grayscale</option>
-                <option value="contrast">High Contrast — black / white</option>
-                <option value="nord">Nord — pale slate / blue</option>
-                <option value="dracula">Dracula — plum / lavender</option>
-                <option value="solarized">Solarized — parchment / gold</option>
-                <option value="rose">Rose — charcoal / dusty rose</option>
-                <option value="coffee">Coffeehouse — espresso / copper</option>
-                <option value="matrix">Matrix — black / green</option>
-                <option value="sunset">Sunset — plum / peach</option>
-              </select>
+            <div className="px-5 py-3 border-t border-[#2a2f40] flex items-center justify-between shrink-0 bg-[#13151d]">
+              <span className="text-xs text-zinc-600">Changes are saved automatically.</span>
+              <button type="button" onClick={() => setShowSettingsModal(false)} className="px-5 py-2 rounded-xl bg-amber-500/15 border border-amber-500/35 text-amber-100 hover:bg-amber-500/20 cursor-pointer font-medium">Done</button>
             </div>
-
-            <div className="sc-settings-section">
-              <div className="flex items-center justify-between gap-3 mb-2">
-                <div>
-                  <div className="sc-settings-section-title">Model-linked Presets</div>
-                  <div className="sc-settings-help">Automatically apply a prompt preset linked to a model when changing the active model.</div>
-                </div>
-                <InfoPopover content="Links are stored locally per model. Turn this off when model changes should never alter your prompts." side="left" />
-              </div>
-              <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer">
-                <input type="checkbox" checked={settings.autoApplyModelPreset} onChange={(e) => updateSettings({ autoApplyModelPreset: e.target.checked })} className="accent-amber-500" />
-                Auto-apply linked preset
-              </label>
-            </div>
-
-            <div className="flex flex-col gap-2 p-2.5 bg-[#12141c] border border-indigo-500/30 rounded">
-
-              <span className="font-semibold text-indigo-300">Gallery & Storage Preferences</span>
-
-
-
-              <div className="flex items-center justify-between">
-
-                <span className="text-gray-300 text-[11px]">Default Gallery Source:</span>
-
-                <select
-
-                  value={settings.gallerySource || 'app'}
-
-                  onChange={(e) => updateSettings({ gallerySource: e.target.value as any })}
-
-                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-[11px] text-gray-200 outline-none font-mono"
-
-                >
-
-                  <option value="app">App Generated Outputs Only</option>
-
-                  <option value="all">All Server Outputs</option>
-
-                </select>
-
-              </div>
-
-
-
-              <div className="flex items-center justify-between pt-1 border-t border-[#252a38]">
-
-                <span className="text-gray-300 text-[11px]">Images per Page (Pagination):</span>
-
-                <select
-
-                  value={settings.galleryPageSize || 24}
-
-                  onChange={(e) => updateSettings({ galleryPageSize: Number(e.target.value) })}
-
-                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-[11px] text-gray-200 outline-none font-mono"
-
-                >
-
-                  <option value={12}>12 images</option>
-
-                  <option value={24}>24 images (Default)</option>
-
-                  <option value={48}>48 images</option>
-
-                  <option value={96}>96 images</option>
-
-                </select>
-
-              </div>
-
-            </div>
-
-
-
-            <div className="flex flex-col gap-2 p-2.5 bg-[#12141c] border border-[#252938] rounded">
-
-              <span className="font-semibold text-indigo-300">Categorization Engine</span>
-
-
-
-              <select
-
-                value={settings.categorizationMode || 'prompt_flow'}
-
-                onChange={async (e) => {
-
-                  const mode = e.target.value as any;
-
-                  updateSettings({ categorizationMode: mode });
-
-                  await danbooru.setCategorizationMode(mode);
-
-                  useAppStore.getState().setActiveMacroCategory('All');
-
-                  useAppStore.getState().setActiveSubCategory('All');
-
-                }}
-
-                className="bg-[#1a1d28] border border-[#2e3346] rounded p-1.5 text-xs text-gray-200 font-semibold outline-none cursor-pointer"
-
-              >
-
-                <option value="prompt_flow">Prompt-Flow Pipeline (Workflow-Centric) — Recommended</option>
-
-                <option value="danbooru_types">Danbooru Official Types (General, Character, Copyright, Artist, Meta)</option>
-
-                <option value="danbooru_groups">Danbooru Wiki Tag Groups (Extension Standard)</option>
-
-              </select>
-
-
-
-              <div className="flex items-center justify-between pt-1 border-t border-[#252a38]">
-
-                <span className="text-gray-300 text-[11px]">Tag Sorting Order:</span>
-
-                <select
-
-                  value={settings.tagSortOrder || 'alphabetical'}
-
-                  onChange={async (e) => {
-
-                    const sort = e.target.value as any;
-
-                    updateSettings({ tagSortOrder: sort });
-
-                    await danbooru.setSortMode(sort);
-
-                  }}
-
-                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-[11px] text-gray-200 outline-none cursor-pointer font-mono"
-
-                >
-
-                  <option value="alphabetical">A–Z Alphabetical</option>
-
-                  <option value="popularity">Popularity (Post Count)</option>
-
-                </select>
-
-              </div>
-
-            </div>
-
-
-
-            <div className="flex flex-col gap-2 border-t border-[#252a38] pt-2">
-
-              <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">
-
-                Audio Notifications
-
-              </span>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span className="flex items-center gap-2">
-
-                  <Volume2 className="w-3.5 h-3.5 text-indigo-400" />
-
-                  <span>Play sound when batch generation completes</span>
-
-                </span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.playCompletionSound}
-
-                  onChange={(e) => updateSettings({ playCompletionSound: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4 cursor-pointer"
-
-                />
-
-              </label>
-
-            </div>
-
-
-
-            <div className="flex flex-col gap-2 border-t border-[#252a38] pt-2">
-
-              <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Prompt & Tag Customization</span>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Auto-inject LoRA activation words on insert</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.autoInjectLoraTrigger}
-
-                  onChange={(e) => updateSettings({ autoInjectLoraTrigger: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Display '+' prefix before tag labels</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.showTagPlusPrefix}
-
-                  onChange={(e) => updateSettings({ showTagPlusPrefix: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Display post count badges on pills</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.showTagPostCounts}
-
-                  onChange={(e) => updateSettings({ showTagPostCounts: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Format tags with underscores instead of spaces</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.useUnderscores}
-
-                  onChange={(e) => updateSettings({ useUnderscores: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-            </div>
-
-
-
-            <div className="flex flex-col gap-2 border-t border-[#252a38] pt-2">
-
-              <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">State & Persistence</span>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Preserve prompts & parameters across browser reloads</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.preservePromptsOnReload}
-
-                  onChange={(e) => updateSettings({ preservePromptsOnReload: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-
-
-              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
-
-                <span>Auto-save Dockview panel arrangements</span>
-
-                <input
-
-                  type="checkbox"
-
-                  checked={settings.autoSaveLayout}
-
-                  onChange={(e) => updateSettings({ autoSaveLayout: e.target.checked })}
-
-                  className="accent-indigo-500 w-4 h-4"
-
-                />
-
-              </label>
-
-
-
-              <button
-
-                onClick={() => {
-
-                  localStorage.removeItem('swarm_canvas_persisted_store');
-
-                  localStorage.removeItem('swarm_dockview_layout');
-
-                  window.location.reload();
-
-                }}
-
-                className="w-full py-1.5 bg-rose-950/50 border border-rose-700/80 text-rose-300 rounded hover:bg-rose-900 transition cursor-pointer mt-2"
-
-              >
-
-                Reset All Stored State & Layout to Default
-
-              </button>
-
-            </div>
-
           </div>
-
         </div>
-
       )}
-
-
 
       {showShortcutsModal && (
 
