@@ -996,7 +996,7 @@ class SwarmClientClass {
             }
           }
 
-          if (msg.error || latestBackendError && /error|failed|cannot generate|refused to generate|all backends failed|execution error/i.test(backendMessage)) {
+          if (msg.error || /error|failed|cannot generate|refused to generate|all backends failed|execution error/i.test(latestBackendError)) {
             if (!resolved) {
               const errorText = String(msg.error || latestBackendError || backendMessage || 'SwarmUI reported a generation failure.').trim();
               resolved = true;

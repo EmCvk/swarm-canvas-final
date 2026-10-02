@@ -1942,3 +1942,188 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   background: color-mix(in srgb, var(--sc-surface-3) 82%, var(--sc-text) 4%) !important;
   color: var(--sc-text) !important;
 }
+
+
+/* ==========================================================================
+   2026 workspace polish: stable panel chrome, density, controls and surfaces
+   ========================================================================== */
+.sc-panel-surface {
+  background: var(--sc-surface-0) !important;
+  color: var(--sc-text) !important;
+  border-color: var(--sc-border) !important;
+  --sc-panel-padding: 10px;
+}
+.sc-history-panel,
+.sc-gallery-panel {
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--sc-gold-soft) 70%, transparent), transparent 34%),
+    var(--sc-surface-0) !important;
+}
+.sc-history-panel > :first-child,
+.sc-gallery-panel > :first-child {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  padding: 7px 8px 8px;
+  margin: -4px -4px 0;
+  border: 1px solid color-mix(in srgb, var(--sc-border) 86%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--sc-surface-1) 94%, transparent);
+  box-shadow: 0 10px 24px rgba(0,0,0,.16);
+  backdrop-filter: blur(10px);
+}
+.sc-history-panel input,
+.sc-gallery-panel input,
+.sc-prompt-editor input,
+.sc-prompt-editor select,
+.sc-prompt-editor textarea {
+  border-color: var(--sc-border) !important;
+  background: color-mix(in srgb, var(--sc-surface-0) 94%, transparent) !important;
+  color: var(--sc-text) !important;
+}
+.sc-history-panel input:focus,
+.sc-gallery-panel input:focus,
+.sc-prompt-editor input:focus,
+.sc-prompt-editor select:focus,
+.sc-prompt-editor textarea:focus {
+  border-color: color-mix(in srgb, var(--sc-gold) 62%, var(--sc-border)) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sc-gold) 10%, transparent);
+}
+.sc-history-panel input::placeholder,
+.sc-gallery-panel input::placeholder,
+.sc-prompt-editor input::placeholder,
+.sc-prompt-editor textarea::placeholder { color: var(--sc-text-dim) !important; }
+
+.sc-segmented-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--sc-border);
+  border-radius: 8px;
+  background: var(--sc-surface-0);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+.sc-segmented-option {
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 6px !important;
+  color: var(--sc-text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: calc(9px * var(--sc-font-scale, 1));
+  font-weight: 650;
+  transition: background .14s ease, color .14s ease, transform .12s ease;
+}
+.sc-segmented-option:hover { color: var(--sc-text); background: var(--sc-surface-2); }
+.sc-segmented-option.is-active {
+  color: var(--sc-text);
+  background: var(--sc-gold-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sc-gold) 24%, transparent);
+}
+.sc-segmented-option:active { transform: scale(.97); }
+
+/* Make dense image cards feel like one coherent gallery rather than independent Tailwind blocks. */
+.sc-history-panel [class*="grid"],
+.sc-gallery-panel [class*="grid"] { scrollbar-gutter: stable; }
+.sc-history-panel img,
+.sc-gallery-panel img {
+  transition: transform .18s cubic-bezier(.2,.8,.2,1), filter .18s ease, opacity .18s ease;
+}
+.sc-history-panel img:hover,
+.sc-gallery-panel img:hover { filter: brightness(1.055) saturate(1.02); }
+
+/* Prompt editor hierarchy: stronger section separation, quieter utility chrome, clearer focus. */
+.sc-prompt-editor {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--sc-surface-1) 82%, transparent), transparent 42%),
+    var(--sc-surface-0) !important;
+}
+.sc-prompt-editor > div:first-child,
+.sc-prompt-editor > div:nth-child(2) {
+  border-color: var(--sc-border) !important;
+}
+.sc-prompt-editor [class*="bg-[#161822]"] {
+  background: color-mix(in srgb, var(--sc-surface-2) 92%, transparent) !important;
+  border-color: var(--sc-border) !important;
+}
+.sc-prompt-editor [class*="bg-[#161822]"]:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sc-gold) 26%, transparent), 0 8px 24px rgba(0,0,0,.12) !important;
+}
+.sc-prompt-editor [class*="border-indigo-500"] { border-color: color-mix(in srgb, var(--sc-gold) 68%, var(--sc-border)) !important; }
+.sc-prompt-editor [class*="border-rose-500"] { border-color: color-mix(in srgb, var(--sc-danger) 56%, var(--sc-border)) !important; }
+.sc-prompt-editor [class*="bg-[#202434"] {
+  background: var(--sc-surface-3) !important;
+  border-color: var(--sc-border) !important;
+}
+.sc-prompt-editor .sc-lora-pills-bar,
+.sc-prompt-editor .sc-search-suggest {
+  border-color: var(--sc-border) !important;
+}
+
+/* Workspace chrome: reduce the "collection of unrelated panels" effect and make resize edges visible. */
+.sc-workspace-shell .dockview-theme-dark {
+  background: var(--sc-surface-0) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-split-view-container > .dv-sash {
+  background: transparent !important;
+  border: 0 !important;
+  transition: background .14s ease;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-split-view-container > .dv-sash:hover {
+  background: color-mix(in srgb, var(--sc-gold) 30%, transparent) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tab {
+  border-right: 1px solid color-mix(in srgb, var(--sc-border) 58%, transparent);
+  transition: background .14s ease, color .14s ease, box-shadow .14s ease;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tab.dv-active-tab {
+  border-right-color: transparent;
+  box-shadow: inset 0 -2px 0 var(--sc-gold), inset 0 1px 0 color-mix(in srgb, var(--sc-gold) 10%, transparent);
+}
+
+/* Consistent scrollbars inside app panels. */
+.sc-workspace-shell *::-webkit-scrollbar { width: 7px; height: 7px; }
+.sc-workspace-shell *::-webkit-scrollbar-track { background: transparent; }
+.sc-workspace-shell *::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sc-border) 88%, var(--sc-text-dim) 12%);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.sc-workspace-shell *::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sc-gold) 32%, var(--sc-border));
+  background-clip: padding-box;
+}
+
+/* Accessible motion defaults: all custom transitions collapse cleanly when the OS asks for it. */
+@media (prefers-reduced-motion: reduce) {
+  .sc-workspace-shell *,
+  .sc-workspace-shell *::before,
+  .sc-workspace-shell *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+
+/* Generation Viewer uses the same panel language as the rest of the workspace. */
+.sc-generation-viewer {
+  background:
+    radial-gradient(circle at 80% 0%, color-mix(in srgb, var(--sc-gold-soft) 55%, transparent), transparent 32%),
+    var(--sc-surface-0) !important;
+  color: var(--sc-text) !important;
+}
+.sc-generation-viewer > :first-child {
+  background: color-mix(in srgb, var(--sc-surface-1) 96%, transparent) !important;
+  border-color: var(--sc-border) !important;
+  box-shadow: 0 8px 22px rgba(0,0,0,.14);
+}
+.sc-generation-viewer [class*="bg-black/30"] {
+  background: color-mix(in srgb, var(--sc-black) 82%, var(--sc-surface-1)) !important;
+  border-color: var(--sc-border) !important;
+}
+.sc-generation-viewer [class*="border-white"] { border-color: var(--sc-border) !important; }
+.sc-generation-viewer [class*="bg-white/"] { background: var(--sc-surface-2) !important; }
+.sc-generation-viewer details { background: color-mix(in srgb, var(--sc-surface-1) 72%, transparent) !important; }

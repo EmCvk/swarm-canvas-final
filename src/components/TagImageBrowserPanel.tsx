@@ -290,9 +290,22 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
   const [tagInfoExpanded, setTagInfoExpanded] = useState(true);
   const tagListRef = useRef<HTMLElement | null>(null);
   const seenPostIdsRef = useRef<Set<number>>(new Set());
+  const postPageAbortRef = useRef<AbortController | null>(null);
   const restoringBrowserStateRef = useRef(true);
 
-  const currentCategoryCode = useMemo(() => CATEGORY_OPTIONS.find((item) => item.value === category)?.code, [category]);
+  const activeCategoryFilterKeys = useMemo(
+    () => (Object.keys(categoryFilters) as Array<keyof CategoryFilterMap>).filter((key) => categoryFilters[key] !== 'off'),
+    [categoryFilters],
+  );
+  // Once a type filter is active, fetch all tag categories from Danbooru so an
+  // exclusion such as "without artists" can actually reveal non-artist tags.
+  // Without this, the selected category tab (e.g. Artists) would make exclusion
+  // filters appear to return an empty list because the server had already limited
+  // the result set to Artists.
+  const currentCategoryCode = useMemo(() => {
+    if (activeCategoryFilterKeys.length > 0) return undefined;
+    return CATEGORY_OPTIONS.find((item) => item.value === category)?.code;
+  }, [category, activeCategoryFilterKeys]);
   const filteredPosts = useMemo(() => posts.filter((post) => matchesCategoryFilters(post, categoryFilters)), [posts, categoryFilters]);
   const visibleRemoteTags = useMemo(() => {
     const included = (Object.keys(categoryFilters) as Array<keyof CategoryFilterMap>)
@@ -349,7 +362,7 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
     } else {
       setTagPage(1);
     }
-  }, [category, tagSort, postFilterInput]);
+  }, [category, tagSort, postFilterInput, activeCategoryFilterKeys.join('|')]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -399,10 +412,13 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
 
   const loadPostPage = async (requestedPage: number, options?: { resetSeen?: boolean }) => {
     const safePage = Math.max(1, Math.floor(requestedPage));
+    postPageAbortRef.current?.abort();
+    const controller = new AbortController();
+    postPageAbortRef.current = controller;
     setPostLoading(true);
     setError(null);
     try {
-      const rows = await danbooru.getRemotePosts(selectedTag?.name || null, safePage, POST_PAGE_SIZE, undefined, feed, {
+      const rows = await danbooru.getRemotePosts(selectedTag?.name || null, safePage, POST_PAGE_SIZE, controller.signal, feed, {
         date: popularAnchorDate,
         includeTags: positivePostTags,
         excludeTags: negativePostTags,
@@ -421,15 +437,25 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
       setPostPageDraft(String(safePage));
       setHasMorePosts(unique.length >= POST_PAGE_SIZE);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : String(err));
       setHasMorePosts(false);
     } finally {
-      setPostLoading(false);
+      if (postPageAbortRef.current === controller) {
+        postPageAbortRef.current = null;
+        if (!controller.signal.aborted) setPostLoading(false);
+      }
     }
   };
 
+  useEffect(() => () => {
+    postPageAbortRef.current?.abort();
+  }, []);
+
   useEffect(() => {
     seenPostIdsRef.current = new Set();
+    postPageAbortRef.current?.abort();
+    postPageAbortRef.current = null;
     setPosts([]);
     setPostPage(1);
     setHasMorePosts(true);

@@ -225,6 +225,7 @@ export interface AppSettings {
 
 let generationRunToken = 0;
 let pendingInterruptPromise: Promise<boolean> | null = null;
+let assetLoadToken = 0;
 
 export function stripDisabledPromptTags(rawText: string): string {
   if (!rawText) return '';
@@ -543,6 +544,7 @@ export interface AppState {
   setCategorizationMode: (mode: AppSettings['categorizationMode']) => void;
   deleteHistoryItem: (id: string) => void;
   removeFromSessionHistory: (id: string) => void;
+  restoreHistory: (items: HistoryItem[]) => void;
   promptPresets: PromptPreset[];
   savePromptPreset: (name: string, text: string, target: 'positive' | 'negative') => void;
   deletePromptPreset: (id: string) => void;
@@ -885,7 +887,12 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
         set((s) => ({
           history: s.history.filter((h) => h.id !== id),
         })),
-        promptPresets: [],
+
+      restoreHistory: (items) => set((s) => ({
+        history: Array.isArray(items) ? items.slice(0, Math.max(100, s.settings.maxHistoryCount || 5000)) : s.history,
+      })),
+
+      promptPresets: [],
       savePromptPreset: (name, text, target) => {
         const tokens = text.split(/[,\n]+/).map((t) => t.trim()).filter(Boolean);
         const newPreset: PromptPreset = {
@@ -904,6 +911,7 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
       loadAssets: async (forceRefresh = false) => {
         try {
           if (forceRefresh && get().isGenerating) return;
+          const loadToken = ++assetLoadToken;
           swarmClient.setBaseUrl(get().serverUrl || 'http://localhost:7801');
           // Do not force a SwarmUI/Comfy backend refresh during normal app startup,
           // focus recovery, or catalog rehydration. TriggerRefresh can restart or
@@ -980,6 +988,8 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
             });
           };
 
+          if (loadToken !== assetLoadToken) return;
+
           const formattedModels = formatItems(models);
           const formattedLoras = formatItems(loras);
           const formattedEmbeddings = formatItems(embeddings);
@@ -1012,6 +1022,7 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
               vae: nextVaes.includes(s.vae) ? s.vae : 'Automatic',
             };
           });
+          if (loadToken !== assetLoadToken) return;
           set({ isConnected: await swarmClient.testConnection() });
         } catch (err) {
           console.error('[Store] Failed to load asset catalogs:', err);
@@ -1261,7 +1272,11 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           set({ model: targetModel });
         }
 
-        const effectiveSeed = state.seed === -1 ? Math.floor(Math.random() * 2147483647) : state.seed;
+        // A seed of -1 is always randomized. When the explicit "Randomize seed on
+        // new generation" setting is enabled, ordinary Generate actions also get a
+        // fresh seed instead of silently repeating the previous explicit seed.
+        const shouldRandomizeSeed = state.settings.randomizeSeedOnGen || state.seed === -1;
+        const effectiveSeed = shouldRandomizeSeed ? Math.floor(Math.random() * 2147483647) : state.seed;
         const cleanPositive = stripDisabledPromptTags(state.prompt);
         const cleanNegative = stripDisabledPromptTags(state.negativePrompt);
         const currentADetailer = state.aDetailerUnits.map((u) => ({ ...u }));
@@ -1287,7 +1302,7 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
             height: state.height,
             steps: state.steps,
             cfgScale: state.cfgScale,
-            seed: state.seed === -1 ? Math.floor(Math.random() * 2147483647) : effectiveSeed + i,
+            seed: effectiveSeed + i,
             sampler: state.sampler,
             scheduler: state.scheduler,
             status: 'queued',
@@ -1329,7 +1344,9 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           height: variant.height ?? state.height,
           steps: variant.steps ?? state.steps,
           cfgScale: variant.cfgScale ?? state.cfgScale,
-          seed: variant.seed ?? (baseSeed === null ? Math.floor(Math.random() * 2147483647) : baseSeed + index),
+          seed: variant.seed ?? (state.settings.randomizeSeedOnGen || baseSeed === null
+            ? Math.floor(Math.random() * 2147483647)
+            : baseSeed + index),
           sampler: variant.sampler ?? state.sampler,
           scheduler: variant.scheduler ?? state.scheduler,
           status: 'queued',
@@ -1954,52 +1971,57 @@ export const useAppStore = create<AppState>()(
         next.settings.gallerySource = 'session';
         return next;
       },
-      partialize: (state: AppState) => ({
-        serverUrl: state.serverUrl,
-        prompt: state.prompt,
-        negativePrompt: state.negativePrompt,
-        model: state.model,
-        modelsList: state.modelsList,
-        lorasList: state.lorasList,
-        embeddingsList: state.embeddingsList,
-        yoloModelsList: state.yoloModelsList,
-        vae: state.vae,
-        vaesList: state.vaesList,
-        textEncoder: state.textEncoder,
-        textEncoder2: state.textEncoder2,
-        selectedTextEncoders: state.selectedTextEncoders,
-        textEncodersList: state.textEncodersList,
-        steps: state.steps,
-        cfgScale: state.cfgScale,
-        width: state.width,
-        height: state.height,
-        seed: state.seed,
-        sampler: state.sampler,
-        scheduler: state.scheduler,
-        batchCount: state.batchCount,
-        aDetailerUnits: state.aDetailerUnits,
-        controlNetUnits: (state.controlNetUnits || []).map((unit) => ({ ...unit, image: unit.image && !unit.image.startsWith('data:') ? unit.image : undefined })),
-        settings: state.settings,
-        emptyBatches: state.emptyBatches,
-        promptPresets: state.promptPresets || [],
-        lastFailedJob: state.lastFailedJob,
-        // Crash/refresh recovery: jobs that hadn't started yet survive a reload so nothing
-        // queued is silently lost. The currently-running job (if any) is folded back in as a
-        // queued job too, since the in-progress generation itself cannot survive a reload.
-        queue: [
-          ...(state.activeJob ? [{ ...state.activeJob, status: 'queued' as const }] : []),
-          ...state.queue,
-        ].slice(0, 200),
-        // Strip heavy base64 data URLs to protect localStorage from hitting the 5MB browser quota
-        activeImage: state.activeImage && !state.activeImage.startsWith('data:') ? state.activeImage : null,
-        history: (state.history || [])
-          .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
-          .slice(0, 50),
-        // Server gallery is reloaded from SwarmUI when the All Server source is opened.
-        // Do not persist the old 100-item server snapshot as though it were the complete
-        // server history; SwarmUI's ListImages endpoint is itself server-limited per request.
-        galleryHistory: [],
-      }),
+      partialize: (state: AppState) => {
+        const preservePromptsAndParams = state.settings.preservePromptsOnReload !== false;
+        return {
+          serverUrl: state.serverUrl,
+          modelsList: state.modelsList,
+          lorasList: state.lorasList,
+          embeddingsList: state.embeddingsList,
+          yoloModelsList: state.yoloModelsList,
+          vaesList: state.vaesList,
+          textEncodersList: state.textEncodersList,
+          ...(preservePromptsAndParams ? {
+            prompt: state.prompt,
+            negativePrompt: state.negativePrompt,
+            model: state.model,
+            vae: state.vae,
+            textEncoder: state.textEncoder,
+            textEncoder2: state.textEncoder2,
+            selectedTextEncoders: state.selectedTextEncoders,
+            steps: state.steps,
+            cfgScale: state.cfgScale,
+            width: state.width,
+            height: state.height,
+            seed: state.seed,
+            sampler: state.sampler,
+            scheduler: state.scheduler,
+            batchCount: state.batchCount,
+            aDetailerUnits: state.aDetailerUnits,
+            controlNetUnits: (state.controlNetUnits || []).map((unit) => ({ ...unit, image: unit.image && !unit.image.startsWith('data:') ? unit.image : undefined })),
+          } : {}),
+          settings: state.settings,
+          emptyBatches: state.emptyBatches,
+          promptPresets: state.promptPresets || [],
+          lastFailedJob: state.lastFailedJob,
+          // Crash/refresh recovery: jobs that hadn't started yet survive a reload so nothing
+          // queued is silently lost. The currently-running job (if any) is folded back in as a
+          // queued job too, since the in-progress generation itself cannot survive a reload.
+          queue: [
+            ...(state.activeJob ? [{ ...state.activeJob, status: 'queued' as const }] : []),
+            ...state.queue,
+          ].slice(0, 200),
+          // Strip heavy base64 data URLs to protect localStorage from hitting the 5MB browser quota
+          activeImage: state.activeImage && !state.activeImage.startsWith('data:') ? state.activeImage : null,
+          history: (state.history || [])
+            .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
+            .slice(0, 200),
+          // Server gallery is reloaded from SwarmUI when the All Server source is opened.
+          // Do not persist the old 100-item server snapshot as though it were the complete
+          // server history; SwarmUI's ListImages endpoint is itself server-limited per request.
+          galleryHistory: [],
+        };
+      },
       onRehydrateStorage: () => (state) => {
         // Runs once, right after the persisted queue is loaded back in - captures how many
         // jobs survived a crash/refresh so the UI can offer to resume them exactly once,

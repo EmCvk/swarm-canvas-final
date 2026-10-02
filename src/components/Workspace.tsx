@@ -107,6 +107,40 @@ import {
 
 
 
+/** Persistent UI state survives Dockview panel remounts and layout restores. */
+function readLocalState<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw == null ? fallback : (JSON.parse(raw) as T);
+  } catch { return fallback; }
+}
+
+function useLocalState<T>(key: string, fallback: T): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [value, setValue] = useState<T>(() => readLocalState(key, fallback));
+  useEffect(() => {
+    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota/private mode */ }
+  }, [key, value]);
+  return [value, setValue];
+}
+
+const PROMPT_RECOVERY_KEY = 'swarm_prompt_recovery_v2';
+const HISTORY_RECOVERY_KEY = 'swarm_history_recovery_v2';
+const WORKSPACE_UI_STATE_KEYS = [
+  PROMPT_RECOVERY_KEY, HISTORY_RECOVERY_KEY, 'swarm_prompt_active_target_v2', 'swarm_prompt_positive_view_v2',
+  'swarm_prompt_negative_view_v2', 'swarm_prompt_scroll_weight_v2', 'swarm_prompt_collapsed_sections_v2',
+  'swarm_prompt_layout_mode_v2', 'swarm_prompt_positive_width_v2', 'swarm_prompt_tag_browser_collapsed_v2',
+  'swarm_prompt_layout_controls_visible_v1', 'swarm_prompt_tools_bar_visible_v1', 'swarm_history_favorites_only_v2',
+  'swarm_history_scope_v2', 'swarm_history_search_v2', 'swarm_gallery_favorites_only_v2', 'swarm_gallery_search_v2',
+  'swarm_workspace_collapsed_sections_v2', 'swarm_topbar_collapsed_v2', 'swarm_sidebar_collapsed_v2',
+  'swarm_preset_strip_collapsed_v1', 'swarm_parameter_locks_v1', 'swarm_dockview_layout',
+];
+
+function clearWorkspaceUiState() {
+  for (const key of WORKSPACE_UI_STATE_KEYS) {
+    try { window.localStorage.removeItem(key); } catch {}
+  }
+}
 const openPromptPillsPopup = async () => {
   if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
     emitToast('Prompt Pills popup is available in the Tauri desktop app.', 'warning');
@@ -2551,7 +2585,25 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  const [activeTarget, setActiveTarget] = useState<'positive' | 'negative'>('positive');
+  // Recovery snapshot protects the editor from a transient store/layout remount.
+  useEffect(() => {
+    if (settings.preservePromptsOnReload === false) return;
+    const saved = readLocalState<{ positive?: string; negative?: string } | null>(PROMPT_RECOVERY_KEY, null);
+    if (!saved || typeof saved.positive !== 'string' || typeof saved.negative !== 'string') return;
+    const state = useAppStore.getState();
+    const defaultPositive = 'masterpiece, best quality, 1girl, solo';
+    const defaultNegative = 'worst quality, low quality, bad anatomy, blurry';
+    if (state.prompt === defaultPositive && saved.positive !== defaultPositive) setPrompt(saved.positive);
+    if (state.negativePrompt === defaultNegative && saved.negative !== defaultNegative) setNegativePrompt(saved.negative);
+  }, []);
+
+  useEffect(() => {
+    if (settings.preservePromptsOnReload === false) return;
+    try { window.localStorage.setItem(PROMPT_RECOVERY_KEY, JSON.stringify({ positive: prompt, negative: negativePrompt, savedAt: Date.now() })); } catch {}
+  }, [prompt, negativePrompt, settings.preservePromptsOnReload]);
+
+
+  const [activeTarget, setActiveTarget] = useLocalState<'positive' | 'negative'>('swarm_prompt_active_target_v2', 'positive');
 
   const [currentTags, setCurrentTags] = useState<string[]>([]);
 
@@ -2565,9 +2617,9 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  const [positiveViewMode, setPositiveViewMode] = useState<'pills' | 'text'>('pills');
+  const [positiveViewMode, setPositiveViewMode] = useLocalState<'pills' | 'text'>('swarm_prompt_positive_view_v2', 'pills');
 
-  const [negativeViewMode, setNegativeViewMode] = useState<'pills' | 'text'>('pills');
+  const [negativeViewMode, setNegativeViewMode] = useLocalState<'pills' | 'text'>('swarm_prompt_negative_view_v2', 'pills');
 
 
 
@@ -2582,7 +2634,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const [previewPreset, setPreviewPreset] = useState<any | null>(null);
 
 
-  const [scrollWeightEnabled, setScrollWeightEnabled] = useState(true);
+  const [scrollWeightEnabled, setScrollWeightEnabled] = useLocalState<boolean>('swarm_prompt_scroll_weight_v2', true);
 
   // Prompt sections are newline-delimited. They are UI-only structure: the generated
   // prompt string remains unchanged, so existing workflows and metadata stay compatible.
@@ -2590,10 +2642,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     positive: null,
     negative: null,
   });
-  const [collapsedPromptSections, setCollapsedPromptSections] = useState<Record<'positive' | 'negative', number[]>>({
-    positive: [],
-    negative: [],
-  });
+  const [collapsedPromptSections, setCollapsedPromptSections] = useLocalState<Record<'positive' | 'negative', number[]>>('swarm_prompt_collapsed_sections_v2', { positive: [], negative: [] });
 
 
 
@@ -2906,13 +2955,18 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   // 3-way layout switch: 'split' = default (both), 'tags_only' = only tags, 'prompts_only' = only prompts
 
-  const [panelLayoutMode, setPanelLayoutMode] = useState<'split' | 'tags_only' | 'prompts_only'>('split');
+  const [panelLayoutMode, setPanelLayoutMode] = useLocalState<'split' | 'tags_only' | 'prompts_only'>('swarm_prompt_layout_mode_v2', 'split');
 
 
 
   const [promptBoxHeight, setPromptBoxHeight] = useState(settings.bottomPanelHeight ? Math.max(120, settings.bottomPanelHeight - 160) : 180);
 
-  const [positiveWidthPercent, setPositiveWidthPercent] = useState(65);
+  useEffect(() => {
+    const next = settings.bottomPanelHeight ? Math.max(120, settings.bottomPanelHeight - 160) : 180;
+    setPromptBoxHeight((current) => Math.abs(current - next) > 2 ? next : current);
+  }, [settings.bottomPanelHeight]);
+
+  const [positiveWidthPercent, setPositiveWidthPercent] = useLocalState<number>('swarm_prompt_positive_width_v2', 65);
 
   const promptContainerRef = useRef<HTMLDivElement>(null);
 
@@ -2924,7 +2978,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  const [isTagBrowserCollapsed, setIsTagBrowserCollapsed] = useState(false);
+  const [isTagBrowserCollapsed, setIsTagBrowserCollapsed] = useLocalState<boolean>('swarm_prompt_tag_browser_collapsed_v2', false);
   const [showPromptLayoutControls, setShowPromptLayoutControls] = useState<boolean>(() => localStorage.getItem('swarm_prompt_layout_controls_visible_v1') !== '0');
   const [showPromptToolsBar, setShowPromptToolsBar] = useState<boolean>(() => localStorage.getItem('swarm_prompt_tools_bar_visible_v1') !== '0');
 
@@ -5998,7 +6052,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     <div
 
-      className="h-full flex flex-col bg-[#07080b] select-none text-xs overflow-hidden"
+      className="sc-prompt-editor h-full flex flex-col bg-[#07080b] select-none text-xs overflow-hidden"
 
       style={{ zoom: `${settings.sectionScales.pills}%` }}
 
@@ -9725,44 +9779,28 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [selectedMetaItem, setSelectedMetaItem] = useState<HistoryItem | null>(null);
 
-  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useLocalState<boolean>('swarm_history_favorites_only_v2', false);
 
-  const [historySearchQuery, setHistorySearchQuery] = useState('');
+  const [historyScope, setHistoryScope] = useLocalState<'all' | 'session'>('swarm_history_scope_v2', 'all');
+
+  const [historySearchQuery, setHistorySearchQuery] = useLocalState<string>('swarm_history_search_v2', '');
 
   const { suggestions: historySuggestions, activeField: historyActiveField, applySuggestion: applyHistorySuggestion, dismiss: dismissHistorySuggestions } = useFieldSearchSuggestions(historySearchQuery, modelsList, lorasList);
 
 
 
   const sessionHistory = useMemo(() => {
+    const scoped = historyScope === 'session'
+      ? history.filter((item: any) => {
+          const itemTime = item.timestamp || Number(item.id?.split('-')[1]) || 0;
+          return itemTime === 0 || !sessionStartTime || itemTime >= sessionStartTime - 3600000;
+        })
+      : history;
 
-    const filtered = history
-
-      .filter((item: any) => {
-
-        const itemTime = item.timestamp || Number(item.id?.split('-')[1]) || 0;
-
-        return itemTime === 0 || !sessionStartTime || itemTime >= sessionStartTime - 3600000;
-
-      })
-
+    return scoped
       .filter((item) => (!showFavoritesOnly ? true : item.isFavorite))
-
       .filter((item) => matchesGenerationQuery(item, historySearchQuery));
-
-
-
-    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly && !historySearchQuery.trim()) {
-
-      return history.slice(0, 100);
-
-    }
-
-
-
-    return filtered;
-
-  }, [history, sessionStartTime, showFavoritesOnly, historySearchQuery]);
-
+  }, [history, historyScope, sessionStartTime, showFavoritesOnly, historySearchQuery]);
 
 
   const batchedHistory = useMemo(() => {
@@ -9926,7 +9964,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
     <div
 
-      className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs relative"
+      className="sc-panel-surface sc-history-panel h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs relative"
 
       style={{ zoom: `${settings.sectionScales.history}%` }}
 
@@ -9936,7 +9974,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
         <span className="font-semibold text-gray-300 flex items-center gap-1 shrink-0">
 
-          <HistoryIcon className="w-3.5 h-3.5 text-indigo-400" /> Current Session ({sessionHistory.length})
+          <HistoryIcon className="w-3.5 h-3.5 text-indigo-400" /> {historyScope === 'session' ? 'Current Session' : 'Output History'} ({sessionHistory.length})
 
         </span>
 
@@ -10015,6 +10053,11 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
 
         <div className="flex items-center gap-1.5 relative shrink-0">
+
+          <div className="sc-segmented-control" role="group" aria-label="History scope">
+            <button type="button" onClick={() => setHistoryScope('all')} className={`sc-segmented-option ${historyScope === 'all' ? 'is-active' : ''}`}>All</button>
+            <button type="button" onClick={() => setHistoryScope('session')} className={`sc-segmented-option ${historyScope === 'session' ? 'is-active' : ''}`}>Session</button>
+          </div>
 
           <button
 
@@ -10532,9 +10575,9 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   const [selectedMetaItem, setSelectedMetaItem] = useState<HistoryItem | null>(null);
 
-  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useLocalState<boolean>('swarm_gallery_favorites_only_v2', false);
 
-  const [gallerySearchQuery, setGallerySearchQuery] = useState('');
+  const [gallerySearchQuery, setGallerySearchQuery] = useLocalState<string>('swarm_gallery_search_v2', '');
 
   const { suggestions: gallerySuggestions, activeField: galleryActiveField, applySuggestion: applyGallerySuggestion, dismiss: dismissGallerySuggestions } = useFieldSearchSuggestions(gallerySearchQuery, modelsList, lorasList);
 
@@ -10784,7 +10827,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
   return (
 
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs">
+    <div className="sc-panel-surface sc-gallery-panel h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs">
 
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5 flex-wrap gap-2">
 
@@ -13147,27 +13190,46 @@ export const Workspace: React.FC = () => {
     settings, updateSettings, setSectionScale, setPrompt, setNegativePrompt, activeContextMenu,
     setActiveContextMenu, isGenerating, isConnected, queue, activeJob, modelsList, cancelGeneration,
     enqueueAndProcess, queueCurrentGeneration, recoveredQueueSize, dismissRecoveredQueue,
-    startQueueProcessing, clearQueue,
+    startQueueProcessing, clearQueue, history, restoreHistory,
   } = useAppStore(useShallow((s) => ({
     settings: s.settings, updateSettings: s.updateSettings, setSectionScale: s.setSectionScale, setPrompt: s.setPrompt,
     setNegativePrompt: s.setNegativePrompt, activeContextMenu: s.activeContextMenu, setActiveContextMenu: s.setActiveContextMenu,
     isGenerating: s.isGenerating, isConnected: s.isConnected, queue: s.queue, activeJob: s.activeJob, modelsList: s.modelsList,
     cancelGeneration: s.cancelGeneration, enqueueAndProcess: s.enqueueAndProcess, queueCurrentGeneration: s.queueCurrentGeneration,
     recoveredQueueSize: s.recoveredQueueSize, dismissRecoveredQueue: s.dismissRecoveredQueue,
-    startQueueProcessing: s.startQueueProcessing, clearQueue: s.clearQueue,
+    startQueueProcessing: s.startQueueProcessing, clearQueue: s.clearQueue, history: s.history, restoreHistory: s.restoreHistory,
   })));
 
   // Crash/refresh recovery: a leftover queue was loaded back in. Auto-resume if the user has
   // opted into that, otherwise leave the banner up until they choose Resume or Discard.
   useEffect(() => {
+    // Zustand persistence hydrates asynchronously. Waiting on [] here can miss the
+    // recoveredQueueSize transition entirely, leaving auto-resume disabled in practice.
     if (recoveredQueueSize && settings.autoResumeQueueOnLaunch) {
       dismissRecoveredQueue();
       void startQueueProcessing();
     }
-    // Only ever fires once per app load, right after hydration sets recoveredQueueSize.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [recoveredQueueSize, settings.autoResumeQueueOnLaunch, dismissRecoveredQueue, startQueueProcessing]);
 
+
+
+  // Keep a lightweight history shadow outside Zustand persistence. This is a safety net for
+  // transient panel/store resets; it deliberately keeps the last non-empty snapshot so an
+  // accidental empty state can be recovered without storing image bytes.
+  useEffect(() => {
+    if (!history.length) {
+      const saved = readLocalState<HistoryItem[] | null>(HISTORY_RECOVERY_KEY, null);
+      if (saved?.length) restoreHistory(saved);
+      return;
+    }
+    try {
+      const compact = history.slice(0, 200).filter((item) => item.imageUrl && !item.imageUrl.startsWith('data:')).map((item) => ({
+        ...item,
+        rawMetadata: undefined,
+      }));
+      window.localStorage.setItem(HISTORY_RECOVERY_KEY, JSON.stringify(compact));
+    } catch { /* quota/private mode */ }
+  }, [history, restoreHistory]);
 
 
   const resolvedTheme = settings.uiTheme === 'cyber_black' ? 'obsidian' : settings.uiTheme === 'classic' ? 'paper' : settings.uiTheme;
@@ -13184,11 +13246,7 @@ export const Workspace: React.FC = () => {
 
   const modelCount = modelsList.length;
 
-  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
-
-    bottomTray: false,
-
-  });
+  const [collapsedSections, setCollapsedSections] = useLocalState<Record<string, boolean>>('swarm_workspace_collapsed_sections_v2', { bottomTray: false });
 
 
 
@@ -13446,7 +13504,7 @@ export const Workspace: React.FC = () => {
     };
   }, [dockApi]);
 
-  const [isTopBarCollapsed, setIsTopBarCollapsed] = useState(false);
+  const [isTopBarCollapsed, setIsTopBarCollapsed] = useLocalState<boolean>('swarm_topbar_collapsed_v2', false);
 
   const [showAddMenu, setShowAddMenu] = useState(false);
 
@@ -13478,7 +13536,7 @@ export const Workspace: React.FC = () => {
 
   const [activeScaleSection, setActiveScaleSection] = useState<keyof AppSettings['sectionScales']>('pills');
 
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useLocalState<boolean>('swarm_sidebar_collapsed_v2', false);
 
   const savedSidebarWidth = useRef(320);
 
@@ -13501,6 +13559,12 @@ export const Workspace: React.FC = () => {
 
 
   const [bottomHeight, setBottomHeight] = useState(settings.bottomPanelHeight || 340);
+
+  useEffect(() => {
+    const next = settings.bottomPanelHeight || 340;
+    setBottomHeight((current) => Math.abs(current - next) > 2 ? next : current);
+    bottomHeightRef.current = next;
+  }, [settings.bottomPanelHeight]);
 
   const bottomHeightRef = useRef(settings.bottomPanelHeight || 340);
 
@@ -14729,7 +14793,7 @@ export const Workspace: React.FC = () => {
 
                     <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Completion Sound</div><div className="flex flex-wrap items-center gap-3"><label className="sc-setting-card flex-1 min-w-[260px]"><span className="sc-setting-label">Custom completion sound</span><input type="file" accept="audio/*" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => updateSettings({ completionSoundData: String(reader.result || '') }); reader.readAsDataURL(file); }} className="block w-full text-xs text-zinc-400 file:mr-3 file:rounded-lg file:border-0 file:bg-white/10 file:px-3 file:py-2 file:text-zinc-200 file:cursor-pointer cursor-pointer" /></label>{settings.completionSoundData && <button type="button" onClick={() => updateSettings({ completionSoundData: null })} className="px-4 py-2.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300 cursor-pointer">Clear custom sound</button>}</div></div>
 
-                    <div className="sc-settings-section"><div className="flex items-center justify-between gap-3"><div><div className="text-base font-semibold text-gray-100">Reset</div><div className="text-xs text-zinc-500">Removes persisted interface state and reloads the application.</div></div><button type="button" onClick={() => { localStorage.removeItem('swarm_canvas_persisted_store'); localStorage.removeItem('swarm_dockview_layout'); window.location.reload(); }} className="px-4 py-2.5 rounded-xl bg-rose-950/60 border border-rose-700/70 text-rose-200 hover:bg-rose-900/60 cursor-pointer">Reset Stored State & Layout</button></div></div>
+                    <div className="sc-settings-section"><div className="flex items-center justify-between gap-3"><div><div className="text-base font-semibold text-gray-100">Reset</div><div className="text-xs text-zinc-500">Removes persisted interface state and reloads the application.</div></div><button type="button" onClick={() => { localStorage.removeItem('swarm_canvas_persisted_store'); clearWorkspaceUiState(); window.location.reload(); }} className="px-4 py-2.5 rounded-xl bg-rose-950/60 border border-rose-700/70 text-rose-200 hover:bg-rose-900/60 cursor-pointer">Reset Stored State & Layout</button></div></div>
                   </>
                 )}
               </div>

@@ -91,7 +91,7 @@ export const GenerationViewerPanel: React.FC<any> = () => {
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-[#0b0d12] text-zinc-300 overflow-hidden">
+    <div className="sc-generation-viewer h-full min-h-0 flex flex-col bg-[#0b0d12] text-zinc-300 overflow-hidden">
       <div className="shrink-0 px-3 py-2.5 border-b border-white/8 bg-[#11141a] flex items-center gap-2">
         <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-400/20 flex items-center justify-center"><Info className="w-4 h-4 text-amber-300" /></div>
         <div className="min-w-0">
