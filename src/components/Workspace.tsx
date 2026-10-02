@@ -143,6 +143,101 @@ const requestGenerationViewer = (item: HistoryItem) => {
   }
 };
 
+const openHistoryGalleryImage = (item: HistoryItem) => {
+  const state = useAppStore.getState();
+  if (state.settings.imageOpenTarget === 'generationviewer') {
+    requestGenerationViewer(item);
+    return;
+  }
+  state.setParams({ activeImage: resolveImageUrl(item.imageUrl) });
+};
+
+const ImageOpenTargetToggle: React.FC<{
+  value: AppSettings['imageOpenTarget'];
+  onChange: (value: AppSettings['imageOpenTarget']) => void;
+}> = ({ value, onChange }) => (
+  <div className="flex items-center bg-[#0d0e14] border border-white/10 rounded-lg p-0.5" title="Choose what happens when you click an image">
+    <button
+      type="button"
+      onClick={() => onChange('viewport')}
+      className={`px-1.5 py-1 rounded text-[9px] font-mono transition ${value === 'viewport' ? 'bg-cyan-500/20 text-cyan-200' : 'text-zinc-500 hover:text-zinc-200'}`}
+      title="Open clicked images in the Viewport"
+    >
+      Viewport
+    </button>
+    <button
+      type="button"
+      onClick={() => onChange('generationviewer')}
+      className={`px-1.5 py-1 rounded text-[9px] font-mono transition ${value === 'generationviewer' ? 'bg-amber-500/20 text-amber-200' : 'text-zinc-500 hover:text-zinc-200'}`}
+      title="Open clicked images in the Generation Viewer"
+    >
+      Viewer
+    </button>
+  </div>
+);
+
+/**
+ * Resolve the single Generation Viewer panel from any Dockview layout.
+ *
+ * Dockview 8 exposes the complete panel collection through `api.panels`.
+ * Do not rely on a particular panel id because older saved layouts may have
+ * generated ids. The component type is the stable identity of this panel.
+ *
+ * If an older layout already contains duplicate Generation Viewers, prefer the
+ * first non-canonical (legacy) viewer. This preserves a viewer that the user
+ * may have manually moved/docked before the singleton fix was introduced.
+ */
+const getGenerationViewerPanels = (api: DockviewApi | null): any[] => {
+  if (!api) return [];
+
+  try {
+    return (api.panels || []).filter((panel: any) => panel?.component === 'generationviewer');
+  } catch (error) {
+    console.warn('[Workspace] Could not enumerate Dockview panels:', error);
+    return [];
+  }
+};
+
+const findGenerationViewerPanel = (api: DockviewApi | null): any | null => {
+  const panels = getGenerationViewerPanels(api);
+  if (panels.length === 0) return null;
+  if (panels.length === 1) return panels[0];
+
+  // A viewer created by an older build may have an id such as
+  // `generationviewer_<timestamp>`. Prefer that over the canonical panel when
+  // cleaning up a duplicate pair, because it is the one the user may already
+  // have positioned manually.
+  return panels.find((panel: any) => panel?.id !== 'generationviewer_panel') || panels[0];
+};
+
+const consolidateGenerationViewerPanels = (api: DockviewApi | null): any | null => {
+  if (!api) return null;
+
+  const panels = getGenerationViewerPanels(api);
+  if (panels.length <= 1) return panels[0] || null;
+
+  const keeper = panels.find((panel: any) => panel?.id !== 'generationviewer_panel') || panels[0];
+
+  for (const panel of panels) {
+    if (panel === keeper) continue;
+    try {
+      api.removePanel(panel);
+    } catch (error) {
+      console.warn('[Workspace] Could not remove duplicate Generation Viewer:', error);
+    }
+  }
+
+  return keeper;
+};
+
+const activateGenerationViewerPanel = (panel: any) => {
+  try {
+    panel?.api?.setActive?.();
+  } catch (error) {
+    console.warn('[Workspace] Could not activate Generation Viewer panel:', error);
+  }
+};
+
 /* =========================================================================
 
    STAGE COLOR MAP & CONTEXT CO-OCCURRENCE DICTIONARY
@@ -4841,7 +4936,6 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     const allMuted = indices.every((i) => tokens[i].startsWith('/*') && tokens[i].endsWith('*/'));
     indices.forEach((index) => {
       const tok = tokens[index];
-      const muted = tok.startsWith('/*') && tok.endsWith('*/');
       const clean = tok.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
       tokens[index] = allMuted ? clean : `/* ${clean} */`;
     });
@@ -8434,6 +8528,9 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+
+
+
           <div className="flex items-center bg-[#0d0e14] border border-white/10 rounded-lg p-0.5">
 
             <button
@@ -9941,6 +10038,8 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+          <ImageOpenTargetToggle value={settings.imageOpenTarget || 'viewport'} onChange={(value) => updateSettings({ imageOpenTarget: value })} />
+
           <div className="flex items-center bg-[#0d0e14] border border-white/10 rounded-lg p-0.5">
 
             <button
@@ -10077,7 +10176,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 
                       key={item.id || index}
 
-                      onClick={() => requestGenerationViewer(item)}
+                      onClick={() => openHistoryGalleryImage(item)}
 
                       onContextMenu={(e) => handleHistoryContextMenu(e, item)}
 
@@ -10370,7 +10469,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
     galleryHistory, projectHistory, history, sessionStartTime, setParams, useGenerationParams, setComparisonImage,
 
-    deleteHistoryItem, setActiveContextMenu, syncServerGallery, loadMoreServerGalleryPages, loadServerGalleryPage, loadProjectGallery, settings, updateSettings,
+    deleteHistoryItem, setActiveContextMenu, syncServerGallery, loadMoreServerGalleryPages, loadProjectGallery, settings, updateSettings,
     outputGalleryTotalCount, outputGalleryLoadedPageNumbers, outputGalleryPages,
 
     galleryCurrentPage, setGalleryCurrentPage, toggleFavorite,
@@ -10775,6 +10874,9 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
         <div className="flex items-center gap-1.5 flex-wrap">
 
+
+          <ImageOpenTargetToggle value={settings.imageOpenTarget || 'viewport'} onChange={(value) => updateSettings({ imageOpenTarget: value })} />
+
           {/* Gallery source: session by default, with explicit Local Project and All Outputs views. */}
           <select
             value={settings.gallerySource || 'session'}
@@ -10988,7 +11090,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
                 key={item.id || index}
 
-                onClick={() => requestGenerationViewer(item)}
+                onClick={() => openHistoryGalleryImage(item)}
 
                 onContextMenu={(e) => handleGalleryContextMenu(e, item)}
 
@@ -11473,7 +11575,7 @@ const ImageSearchPanel: React.FC<IDockviewPanelProps> = () => {
 
               key={item.id}
 
-              onClick={() => setParams({ activeImage: resolveImageUrl(item.imageUrl) })}
+              onClick={() => openHistoryGalleryImage(item)}
 
               onContextMenu={(e) => handleSearchContextMenu(e, item)}
 
@@ -13296,11 +13398,25 @@ export const Workspace: React.FC = () => {
 
   useEffect(() => {
     if (!dockApi) return;
+
+    // Normalize layouts restored from older builds before handling image-click
+    // requests. This prevents a stale duplicate viewer from surviving a reload.
+    const normalizeGenerationViewer = () => {
+      consolidateGenerationViewerPanels(dockApi);
+    };
+    try {
+      normalizeGenerationViewer();
+    } catch (error) {
+      console.warn('[Workspace] Could not normalize Generation Viewer layout:', error);
+    }
+
     const openGenerationViewerPanel = () => {
       try {
-        const existing = (dockApi as any).getPanel?.('generationviewer_panel');
+        // Generation Viewer is a singleton regardless of where it is docked.
+        // This also recognizes viewers from older persisted layouts.
+        const existing = consolidateGenerationViewerPanels(dockApi);
         if (existing) {
-          try { (existing.api as any)?.setActive?.(); } catch {}
+          activateGenerationViewerPanel(existing);
           return;
         }
         const panel = dockApi.addPanel({
@@ -13311,12 +13427,23 @@ export const Workspace: React.FC = () => {
         });
         try { (panel.api as any)?.setActive?.(); } catch {}
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // Dockview can race with a persisted-layout restore and report that the
+        // canonical id already exists. Treat that as a successful singleton
+        // resolution instead of showing a user-facing error notification.
+        if (/panel with id .*already exists/i.test(message)) {
+          const existing = consolidateGenerationViewerPanels(dockApi);
+          if (existing) activateGenerationViewerPanel(existing);
+          return;
+        }
         console.error('[Workspace] Could not open Generation Viewer:', error);
-        emitToast(`Could not open Generation Viewer: ${error instanceof Error ? error.message : String(error)}`, 'error');
+        emitToast(`Could not open Generation Viewer: ${message}`, 'error');
       }
     };
     window.addEventListener('swarm-open-generation-viewer', openGenerationViewerPanel);
-    return () => window.removeEventListener('swarm-open-generation-viewer', openGenerationViewerPanel);
+    return () => {
+      window.removeEventListener('swarm-open-generation-viewer', openGenerationViewerPanel);
+    };
   }, [dockApi]);
 
   const [isTopBarCollapsed, setIsTopBarCollapsed] = useState(false);
@@ -13649,9 +13776,18 @@ export const Workspace: React.FC = () => {
 
     if (!dockApi) return;
 
+    if (type === 'generationviewer') {
+      const existing = consolidateGenerationViewerPanels(dockApi);
+      if (existing) {
+        activateGenerationViewerPanel(existing);
+        setShowAddMenu(false);
+        return;
+      }
+    }
+
     dockApi.addPanel({
 
-      id: `${type}_${Date.now()}`,
+      id: type === 'generationviewer' ? 'generationviewer_panel' : `${type}_${Date.now()}`,
 
       component: type,
 

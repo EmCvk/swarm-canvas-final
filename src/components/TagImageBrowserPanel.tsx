@@ -64,7 +64,7 @@ const CATEGORY_OPTIONS: Array<{ value: 'all' | 'artists' | 'characters' | 'copyr
   { value: 'meta', label: 'Meta', code: 5 },
 ];
 
-type TagSort = 'count-desc' | 'count-asc' | 'alpha' | 'newest-tag';
+type TagSort = 'count-desc' | 'count-asc' | 'alpha' | 'newest-tag' | 'random';
 type CategoryFilterState = 'off' | 'include' | 'exclude';
 type CategoryFilterMap = Record<'artist' | 'character' | 'copyright' | 'general' | 'meta', CategoryFilterState>;
 
@@ -113,7 +113,7 @@ const CATEGORY_STYLES: Record<string, string> = {
 
 function formatCount(value: number | undefined): string {
   if (!Number.isFinite(value)) return '0';
-  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value ?? 0);
 }
 
 function stripWikiHtml(value: string): string {
@@ -287,12 +287,31 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
   const [hasMorePosts, setHasMorePosts] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPost, setSelectedPost] = useState<RemotePost | null>(null);
+  const [tagInfoExpanded, setTagInfoExpanded] = useState(true);
   const tagListRef = useRef<HTMLElement | null>(null);
   const seenPostIdsRef = useRef<Set<number>>(new Set());
   const restoringBrowserStateRef = useRef(true);
 
   const currentCategoryCode = useMemo(() => CATEGORY_OPTIONS.find((item) => item.value === category)?.code, [category]);
   const filteredPosts = useMemo(() => posts.filter((post) => matchesCategoryFilters(post, categoryFilters)), [posts, categoryFilters]);
+  const visibleRemoteTags = useMemo(() => {
+    const included = (Object.keys(categoryFilters) as Array<keyof CategoryFilterMap>)
+      .filter((key) => categoryFilters[key] === 'include');
+    const excluded = (Object.keys(categoryFilters) as Array<keyof CategoryFilterMap>)
+      .filter((key) => categoryFilters[key] === 'exclude');
+    return remoteTags.filter((tag) => {
+      const tagCategory = tag.categoryName as keyof CategoryFilterMap;
+      if (excluded.includes(tagCategory)) return false;
+      return included.length === 0 || included.includes(tagCategory);
+    });
+  }, [remoteTags, categoryFilters]);
+
+  useEffect(() => {
+    if (!selectedTag || tagLoading || !remoteTags.length) return;
+    if (!visibleRemoteTags.some((tag) => tag.id === selectedTag.id)) {
+      setSelectedTag(null);
+    }
+  }, [selectedTag, visibleRemoteTags, tagLoading, remoteTags.length]);
   const historicalRange = useMemo(() => buildCalendarRange(feed, popularAnchorDate), [feed, popularAnchorDate]);
   const positivePostTags = postFilterTokens.filter((item) => !item.exclude).map((item) => item.value);
   const negativePostTags = postFilterTokens.filter((item) => item.exclude).map((item) => item.value);
@@ -351,12 +370,21 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
         signal: controller.signal,
       }).then((rows) => {
         if (controller.signal.aborted) return;
-        const sorted = [...rows].sort((a, b) => {
-          if (tagSort === 'alpha') return a.name.localeCompare(b.name);
-          if (tagSort === 'count-asc') return a.postCount - b.postCount || a.name.localeCompare(b.name);
-          if (tagSort === 'newest-tag') return b.id - a.id;
-          return b.postCount - a.postCount || a.name.localeCompare(b.name);
-        });
+        let sorted: RemoteTag[];
+        if (tagSort === 'random') {
+          sorted = [...rows];
+          for (let i = sorted.length - 1; i > 0; i -= 1) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [sorted[i], sorted[j]] = [sorted[j], sorted[i]];
+          }
+        } else {
+          sorted = [...rows].sort((a, b) => {
+            if (tagSort === 'alpha') return a.name.localeCompare(b.name);
+            if (tagSort === 'count-asc') return a.postCount - b.postCount || a.name.localeCompare(b.name);
+            if (tagSort === 'newest-tag') return b.id - a.id;
+            return b.postCount - a.postCount || a.name.localeCompare(b.name);
+          });
+        }
         setRemoteTags(sorted);
         setHasMoreTags(rows.length >= TAG_PAGE_SIZE);
         if (selectedTag && currentCategoryCode !== undefined && selectedTag.category !== currentCategoryCode) setSelectedTag(null);
@@ -387,7 +415,7 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
         emitToast('Danbooru returned a duplicate page; pagination stopped to prevent repeated posts.', 'warning');
         return;
       }
-      unique.forEach((id) => seenPostIdsRef.current.add(id));
+      unique.forEach((post) => seenPostIdsRef.current.add(post.id));
       setPosts(unique);
       setPostPage(safePage);
       setPostPageDraft(String(safePage));
@@ -482,7 +510,7 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
             {showTagSuggestions && postFilterInput.trim() && remoteTags.length > 0 && <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-white/10 bg-[#11141a] shadow-2xl overflow-hidden">{remoteTags.slice(0, 8).map((tag) => <button key={`suggest-${tag.id}`} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => addPostFilterToken(`${postFilterInput.trim().startsWith('-') ? '-' : ''}${tag.name}`)} className="w-full px-2.5 py-2 flex items-center gap-2 text-left hover:bg-white/5 cursor-pointer"><span className="font-mono text-[9px] text-zinc-200 truncate">{tag.name.replace(/_/g, ' ')}</span><span className="ml-auto text-[8px] text-zinc-600">{formatCount(tag.postCount)}</span></button>)}</div>}
           </div>
           <select value={tagSort} onChange={(e) => setTagSort(e.target.value as TagSort)} className="px-2 py-2 rounded-lg bg-black/30 border border-white/10 text-[10px] font-mono text-zinc-300 outline-none">
-            <option value="count-desc">Tag count ↓</option><option value="count-asc">Tag count ↑</option><option value="alpha">A–Z</option><option value="newest-tag">Newest tag</option>
+            <option value="count-desc">Tag count ↓</option><option value="count-asc">Tag count ↑</option><option value="alpha">A–Z</option><option value="newest-tag">Newest tag</option><option value="random">Random</option>
           </select>
         </div>
 
@@ -504,9 +532,9 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
 
       <div className="flex-1 min-h-0 grid grid-cols-[minmax(190px,30%)_1fr]">
         <aside ref={tagListRef} className="min-h-0 overflow-y-auto border-r border-white/5 p-2">
-          <div className="px-2 py-1.5 flex items-center justify-between text-[9px] uppercase tracking-wider text-zinc-600 font-semibold"><span>{remoteTags.length.toLocaleString()} tags · page {tagPage}{hasMoreTags ? '+' : ''}</span>{tagLoading && <Loader2 className="w-3 h-3 animate-spin" />}</div>
+          <div className="px-2 py-1.5 flex items-center justify-between text-[9px] uppercase tracking-wider text-zinc-600 font-semibold"><span>{visibleRemoteTags.length.toLocaleString()} tags shown · page {tagPage}{hasMoreTags ? '+' : ''}</span>{tagLoading && <Loader2 className="w-3 h-3 animate-spin" />}</div>
           <div className="space-y-1">
-            {remoteTags.map((tag) => <button key={tag.id || tag.name} type="button" onClick={() => setSelectedTag(tag)} className={`w-full text-left px-2.5 py-2 rounded-lg border transition cursor-pointer ${selectedTag?.name === tag.name ? 'bg-violet-500/10 border-violet-400/25' : 'bg-white/[0.015] border-transparent hover:bg-white/[0.045]'}`}>
+            {visibleRemoteTags.map((tag) => <button key={tag.id || tag.name} type="button" onClick={() => { setSelectedTag(tag); setTagInfoExpanded(true); }} className={`w-full text-left px-2.5 py-2 rounded-lg border transition cursor-pointer ${selectedTag?.name === tag.name ? 'bg-violet-500/10 border-violet-400/25' : 'bg-white/[0.015] border-transparent hover:bg-white/[0.045]'}`}>
               <div className="flex items-center gap-2 min-w-0"><span className="shrink-0">{tag.categoryName === 'artist' ? <UserRound className="w-3 h-3 text-violet-300" /> : <Tag className="w-3 h-3 text-zinc-600" />}</span><span className="truncate font-mono text-[10px] text-zinc-200">{tag.name.replace(/_/g, ' ')}</span><span className="ml-auto shrink-0 font-mono text-[9px] text-zinc-500">{formatCount(tag.postCount)}</span></div>
               <div className="mt-1 flex items-center gap-1.5 pl-5"><span className={`px-1 py-0.5 rounded border text-[7px] uppercase tracking-wider ${CATEGORY_STYLES[tag.categoryName] || CATEGORY_STYLES.unknown}`}>{tag.categoryName}</span>{tag.hasArtist && <span className="text-[8px] text-violet-400">artist-linked</span>}</div>
             </button>)}
@@ -535,8 +563,14 @@ export const TagImageBrowserPanel: React.FC<any> = () => {
           </div>
 
           {selectedTag && <div className="rounded-xl border border-white/10 bg-[#11141a] p-3 mb-3">
-            <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-zinc-100 break-all">{selectedTag.name.replace(/_/g, ' ')}</h3><span className={`px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${CATEGORY_STYLES[selectedTag.categoryName] || CATEGORY_STYLES.unknown}`}>{selectedTag.categoryName}</span></div><div className="mt-1 flex flex-wrap items-center gap-3 text-[9px] font-mono text-zinc-500"><span>{selectedTag.postCount.toLocaleString()} posts</span><span>Danbooru ID {selectedTag.id}</span>{selectedTag.hasArtist && <span className="text-violet-400">artist-linked</span>}</div></div><div className="flex items-center gap-1 shrink-0"><button type="button" onClick={() => insertTag(selectedTag.name, false)} className="px-2 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-400/20 text-emerald-300 hover:bg-emerald-500/15 cursor-pointer">+ Positive</button><button type="button" onClick={() => insertTag(selectedTag.name, true)} className="px-2 py-1.5 rounded-md bg-rose-500/10 border border-rose-400/20 text-rose-300 hover:bg-rose-500/15 cursor-pointer">+ Negative</button><button type="button" onClick={() => void openExternalUrl(danbooru.getRemoteTagUrl(selectedTag.name))} className="p-1.5 rounded-md bg-white/5 border border-white/10 text-zinc-400 hover:text-white cursor-pointer" title="Open tag on Danbooru"><ExternalLink className="w-3.5 h-3.5" /></button></div></div>
-            <div className="mt-3 rounded-lg bg-black/20 border border-white/5 p-2"><div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-zinc-600 font-semibold mb-1.5"><Info className="w-3 h-3" /> Tag info</div>{wikiLoading ? <div className="text-[9px] text-zinc-600">Loading wiki…</div> : wiki?.body ? <div className="text-[10px] leading-relaxed text-zinc-400">{stripWikiHtml(wiki.body).slice(0, 1200)}</div> : <div className="text-[9px] text-zinc-600">No wiki description available for this tag.</div>}</div>
+            <div className="flex items-start gap-3">
+              <button type="button" onClick={() => setTagInfoExpanded((value) => !value)} className="min-w-0 flex-1 text-left cursor-pointer" aria-expanded={tagInfoExpanded}>
+                <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-semibold text-zinc-100 break-all">{selectedTag.name.replace(/_/g, ' ')}</h3><span className={`px-1.5 py-0.5 rounded border text-[8px] uppercase tracking-wider ${CATEGORY_STYLES[selectedTag.categoryName] || CATEGORY_STYLES.unknown}`}>{selectedTag.categoryName}</span></div>
+                <div className="mt-1 flex flex-wrap items-center gap-3 text-[9px] font-mono text-zinc-500"><span>{selectedTag.postCount.toLocaleString()} posts</span><span>Danbooru ID {selectedTag.id}</span>{selectedTag.hasArtist && <span className="text-violet-400">artist-linked</span>}</div>
+              </button>
+              <div className="flex items-center gap-1 shrink-0"><button type="button" onClick={() => insertTag(selectedTag.name, false)} className="px-2 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-400/20 text-emerald-300 hover:bg-emerald-500/15 cursor-pointer">+ Positive</button><button type="button" onClick={() => insertTag(selectedTag.name, true)} className="px-2 py-1.5 rounded-md bg-rose-500/10 border border-rose-400/20 text-rose-300 hover:bg-rose-500/15 cursor-pointer">+ Negative</button><button type="button" onClick={() => void openExternalUrl(danbooru.getRemoteTagUrl(selectedTag.name))} className="p-1.5 rounded-md bg-white/5 border border-white/10 text-zinc-400 hover:text-white cursor-pointer" title="Open tag on Danbooru"><ExternalLink className="w-3.5 h-3.5" /></button></div>
+            </div>
+            {tagInfoExpanded && <div className="mt-3 rounded-lg bg-black/20 border border-white/5 p-2"><div className="flex items-center gap-1.5 text-[9px] uppercase tracking-wider text-zinc-600 font-semibold mb-1.5"><Info className="w-3 h-3" /> Tag info <span className="text-zinc-700">· click header to collapse</span></div>{wikiLoading ? <div className="text-[9px] text-zinc-600">Loading wiki…</div> : wiki?.body ? <div className="text-[10px] leading-relaxed text-zinc-400">{stripWikiHtml(wiki.body).slice(0, 1200)}</div> : <div className="text-[9px] text-zinc-600">No wiki description available for this tag.</div>}</div>}
           </div>}
 
           {postLoading && !posts.length ? <div className="py-16 text-center text-zinc-600 text-[10px]"><Loader2 className="w-5 h-5 mx-auto mb-2 animate-spin" />Fetching images from Danbooru…</div> : !filteredPosts.length ? <div className="py-16 text-center text-zinc-600 text-[10px]">No posts match the current tag/type filters.</div> : <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2">

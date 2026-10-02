@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { create, type StateCreator } from 'zustand';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { swarmClient, SwarmProgressData, ServerImageItem, emitDiagnostic } from '../api/swarmClient';
@@ -219,6 +219,8 @@ export interface AppSettings {
   showPromptSelectionToolbar: boolean;
   promptSyntaxQuickInsert: boolean;
   doubleClickEditPromptPills: boolean;
+  /** Where a History/Gallery image click should open the image. */
+  imageOpenTarget: 'viewport' | 'generationviewer';
 }
 
 let generationRunToken = 0;
@@ -546,9 +548,7 @@ export interface AppState {
   deletePromptPreset: (id: string) => void;
 }
 
-export const useAppStore = create<AppState>()(
-  persist(
-    (set, get) => ({
+const createAppStore: StateCreator<AppState> = (set, get) => ({
       serverUrl: 'http://localhost:7801',
       sessionId: null,
       isConnected: false,
@@ -810,6 +810,7 @@ export const useAppStore = create<AppState>()(
         showPromptSelectionToolbar: true,
         promptSyntaxQuickInsert: true,
         doubleClickEditPromptPills: true,
+        imageOpenTarget: 'viewport',
       },
 
       toggleFavorite: (id: string) => {
@@ -1864,8 +1865,10 @@ export const useAppStore = create<AppState>()(
 
       setCategorizationMode: (mode) =>
         set((s) => ({ settings: { ...s.settings, categorizationMode: mode } })),
-    }),
-    {
+    });
+
+export const useAppStore = create<AppState>()(
+  persist(createAppStore, {
       name: 'swarm_canvas_persisted_store',
       version: 7,
       storage: createJSONStorage(() => localStorage),
@@ -1928,6 +1931,7 @@ export const useAppStore = create<AppState>()(
         if (typeof next.settings.showPromptSelectionToolbar !== 'boolean') next.settings.showPromptSelectionToolbar = true;
         if (typeof next.settings.promptSyntaxQuickInsert !== 'boolean') next.settings.promptSyntaxQuickInsert = true;
         if (typeof next.settings.doubleClickEditPromptPills !== 'boolean') next.settings.doubleClickEditPromptPills = true;
+        if (next.settings.imageOpenTarget !== 'generationviewer' && next.settings.imageOpenTarget !== 'viewport') next.settings.imageOpenTarget = 'viewport';
         const savedTextEncoders = Array.isArray(next.textEncodersList) ? next.textEncodersList.map((value: unknown) => String(value)) : [];
         next.textEncodersList = Array.from(new Set(['Automatic', 'None', 'qwen_3_06b_base.safetensors', 'qwen35_4b.safetensors', ...savedTextEncoders]));
         if (next.settings.uiTheme === 'cyber_black' || next.settings.uiTheme == null) {
@@ -1950,7 +1954,7 @@ export const useAppStore = create<AppState>()(
         next.settings.gallerySource = 'session';
         return next;
       },
-      partialize: (state) => ({
+      partialize: (state: AppState) => ({
         serverUrl: state.serverUrl,
         prompt: state.prompt,
         negativePrompt: state.negativePrompt,

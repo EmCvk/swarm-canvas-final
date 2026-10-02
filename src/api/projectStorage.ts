@@ -282,7 +282,6 @@ export async function addHistoryItemsToProject(
 ): Promise<HistoryItem[]> {
   if (!isTauriRuntime()) throw new Error('Local Project storage requires the SwarmCanvas desktop app.');
 
-  const format = settings.projectImageFormat || 'jpg';
   const savedItems: HistoryItem[] = [];
   const projectRoot = await getLocalProjectLocation(settings.localProjectPath);
 
