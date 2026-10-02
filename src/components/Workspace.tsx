@@ -2599,7 +2599,13 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   useEffect(() => {
     if (settings.preservePromptsOnReload === false) return;
-    try { window.localStorage.setItem(PROMPT_RECOVERY_KEY, JSON.stringify({ positive: prompt, negative: negativePrompt, savedAt: Date.now() })); } catch {}
+    try {
+      window.localStorage.setItem(PROMPT_RECOVERY_KEY, JSON.stringify({
+        positive: prompt,
+        negative: negativePrompt,
+        savedAt: Date.now(),
+      }));
+    } catch { /* storage may be unavailable or full; Zustand remains the primary state */ }
   }, [prompt, negativePrompt, settings.preservePromptsOnReload]);
 
 
@@ -13223,7 +13229,7 @@ export const Workspace: React.FC = () => {
       return;
     }
     try {
-      const compact = history.slice(0, 200).filter((item) => item.imageUrl && !item.imageUrl.startsWith('data:')).map((item) => ({
+      const compact = history.slice(0, 500).filter((item) => item.imageUrl && !item.imageUrl.startsWith('data:')).map((item) => ({
         ...item,
         rawMetadata: undefined,
       }));

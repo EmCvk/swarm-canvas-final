@@ -2127,3 +2127,250 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
 .sc-generation-viewer [class*="border-white"] { border-color: var(--sc-border) !important; }
 .sc-generation-viewer [class*="bg-white/"] { background: var(--sc-surface-2) !important; }
 .sc-generation-viewer details { background: color-mix(in srgb, var(--sc-surface-1) 72%, transparent) !important; }
+
+/* ============================================================================
+   UX CONSISTENCY LAYER
+   Keep legacy Tailwind utility markup functional while giving every theme the
+   same interaction language: one surface hierarchy, one control shape, one
+   focus treatment, and semantic colors only where they carry information.
+   ============================================================================ */
+
+.sc-workspace-shell {
+  --sc-control-bg: color-mix(in srgb, var(--sc-surface-2) 82%, var(--sc-surface-0));
+  --sc-control-hover: color-mix(in srgb, var(--sc-surface-3) 86%, var(--sc-surface-0));
+  --sc-control-active: var(--sc-gold-soft);
+  --sc-focus-ring: color-mix(in srgb, var(--sc-gold) 42%, transparent);
+  --sc-divider: color-mix(in srgb, var(--sc-border) 78%, transparent);
+  --sc-elevation-1: 0 1px 2px rgba(0,0,0,.18), 0 6px 18px rgba(0,0,0,.10);
+  --sc-elevation-2: 0 12px 34px rgba(0,0,0,.22);
+  --sc-control-radius: 9px;
+}
+
+/* Native controls and legacy neutral utility surfaces */
+.sc-workspace-shell input:not([type="range"]),
+.sc-workspace-shell textarea,
+.sc-workspace-shell select {
+  border: 1px solid var(--sc-divider) !important;
+  border-radius: var(--sc-control-radius) !important;
+  background: color-mix(in srgb, var(--sc-surface-0) 88%, var(--sc-surface-2)) !important;
+  color: var(--sc-text) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--sc-text) 3%, transparent);
+  transition: border-color .16s ease, box-shadow .16s ease, background-color .16s ease;
+}
+
+.sc-workspace-shell input:not([type="range"]):hover,
+.sc-workspace-shell textarea:hover,
+.sc-workspace-shell select:hover {
+  border-color: color-mix(in srgb, var(--sc-border) 80%, var(--sc-text) 20%) !important;
+}
+
+.sc-workspace-shell input:not([type="range"]):focus,
+.sc-workspace-shell textarea:focus,
+.sc-workspace-shell select:focus {
+  border-color: color-mix(in srgb, var(--sc-gold) 62%, var(--sc-border)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sc-gold) 11%, transparent), inset 0 1px 0 color-mix(in srgb, var(--sc-text) 4%, transparent) !important;
+  outline: none !important;
+}
+
+/* Convert common neutral utility backgrounds to theme tokens. This deliberately
+   leaves semantic blue/green/red/amber/purple controls alone. */
+.sc-workspace-shell [class~="bg-black"],
+.sc-workspace-shell [class~="bg-black/30"],
+.sc-workspace-shell [class~="bg-black/40"],
+.sc-workspace-shell [class~="bg-black/50"],
+.sc-workspace-shell [class~="bg-[#0d0e14]"],
+.sc-workspace-shell [class~="bg-[#121418]"],
+.sc-workspace-shell [class~="bg-[#12141a]"],
+.sc-workspace-shell [class~="bg-[#161822]"],
+.sc-workspace-shell [class~="bg-[#1a1d24]"],
+.sc-workspace-shell [class~="bg-[#202434]"] {
+  background: var(--sc-surface-1) !important;
+  color: var(--sc-text) !important;
+}
+
+.sc-workspace-shell [class*="border-white/"],
+.sc-workspace-shell [class*="border-neutral-"],
+.sc-workspace-shell [class*="border-zinc-"],
+.sc-workspace-shell [class*="border-slate-"] {
+  border-color: var(--sc-divider) !important;
+}
+
+.sc-workspace-shell [class*="bg-white/5"],
+.sc-workspace-shell [class*="bg-white/[0.035]"],
+.sc-workspace-shell [class*="bg-white/[0.04]"],
+.sc-workspace-shell [class*="bg-white/[0.05]"],
+.sc-workspace-shell [class*="bg-white/[0.06]"] {
+  background: color-mix(in srgb, var(--sc-surface-2) 72%, transparent) !important;
+}
+
+/* Consistent icon/action controls. */
+.sc-workspace-shell .sc-topbar-icon-button,
+.sc-workspace-shell .sc-panel-control,
+.sc-workspace-shell .sc-action-button {
+  min-height: 30px;
+  border: 1px solid var(--sc-divider) !important;
+  border-radius: 9px !important;
+  background: color-mix(in srgb, var(--sc-surface-2) 72%, transparent) !important;
+  color: var(--sc-text-secondary) !important;
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--sc-text) 3%, transparent);
+}
+.sc-workspace-shell .sc-topbar-icon-button:hover,
+.sc-workspace-shell .sc-panel-control:hover,
+.sc-workspace-shell .sc-action-button:hover {
+  background: var(--sc-control-hover) !important;
+  color: var(--sc-text) !important;
+  border-color: color-mix(in srgb, var(--sc-border) 70%, var(--sc-text) 12%) !important;
+}
+
+/* Primary generate control is visually dominant without becoming oversized. */
+.sc-workspace-shell .sc-generate-button {
+  min-height: 34px;
+  border-radius: 10px !important;
+  box-shadow: 0 5px 18px color-mix(in srgb, var(--sc-gold) 12%, transparent);
+}
+
+/* Panel headers: consistent hierarchy and sticky utility chrome. */
+.sc-workspace-shell .sc-panel-header,
+.sc-workspace-shell .sc-tool-panel-header,
+.sc-workspace-shell .sc-history-panel > :first-child,
+.sc-workspace-shell .sc-gallery-panel > :first-child {
+  border-color: var(--sc-divider) !important;
+}
+
+.sc-workspace-shell .sc-tool-panel-header,
+.sc-workspace-shell .sc-history-panel > :first-child,
+.sc-workspace-shell .sc-gallery-panel > :first-child {
+  background: color-mix(in srgb, var(--sc-surface-1) 91%, transparent) !important;
+  backdrop-filter: blur(14px) saturate(1.05);
+}
+
+/* Cards use a quieter elevation model; hover supplies the affordance instead of
+   persistent bright borders. */
+.sc-workspace-shell .sc-setting-card,
+.sc-workspace-shell .sc-card,
+.sc-workspace-shell .sc-panel-card {
+  border-color: var(--sc-divider) !important;
+  background: color-mix(in srgb, var(--sc-surface-1) 82%, var(--sc-surface-0)) !important;
+  box-shadow: var(--sc-elevation-1);
+}
+
+.sc-workspace-shell .sc-setting-card:hover,
+.sc-workspace-shell .sc-card:hover,
+.sc-workspace-shell .sc-panel-card:hover {
+  border-color: color-mix(in srgb, var(--sc-border) 72%, var(--sc-text) 10%) !important;
+}
+
+/* Gallery/history images get a deliberate selection state instead of a generic
+   brightness jump. */
+.sc-workspace-shell .sc-history-panel img,
+.sc-workspace-shell .sc-gallery-panel img {
+  transition: transform .16s cubic-bezier(.2,.8,.2,1), filter .16s ease, box-shadow .16s ease;
+}
+.sc-workspace-shell .sc-history-panel button:hover img,
+.sc-workspace-shell .sc-gallery-panel button:hover img {
+  transform: scale(1.012);
+}
+
+/* Dockview becomes part of the application instead of looking like an embedded
+   third-party widget. */
+.sc-workspace-shell .dockview-theme-dark,
+.sc-workspace-shell .dockview-theme-dark .dv-groupview,
+.sc-workspace-shell .dockview-theme-dark .dv-content-container,
+.sc-workspace-shell .dockview-theme-dark .dv-view,
+.sc-workspace-shell .dockview-theme-dark .dv-tabs-and-actions-container {
+  background: var(--sc-surface-0) !important;
+  color: var(--sc-text) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tabs-and-actions-container {
+  min-height: 31px;
+  border-bottom: 1px solid var(--sc-divider) !important;
+  background: color-mix(in srgb, var(--sc-surface-1) 92%, transparent) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tab {
+  min-height: 31px;
+  color: var(--sc-text-muted) !important;
+  background: transparent !important;
+  border-right: 1px solid color-mix(in srgb, var(--sc-border) 55%, transparent) !important;
+  transition: background .15s ease, color .15s ease;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tab:hover {
+  color: var(--sc-text) !important;
+  background: color-mix(in srgb, var(--sc-surface-2) 55%, transparent) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-tab.dv-active-tab {
+  color: var(--sc-text) !important;
+  background: color-mix(in srgb, var(--sc-gold-soft) 62%, transparent) !important;
+  box-shadow: inset 0 -2px 0 var(--sc-gold) !important;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-split-view-container > .dv-sash {
+  background: transparent !important;
+  transition: background .15s ease;
+}
+.sc-workspace-shell .dockview-theme-dark .dv-split-view-container > .dv-sash:hover {
+  background: color-mix(in srgb, var(--sc-gold) 30%, transparent) !important;
+}
+
+/* Make popovers/dialogs feel like one design system. */
+.sc-workspace-shell .sc-theme-menu,
+.sc-workspace-shell .sc-context-menu,
+.sc-workspace-shell .sc-settings-modal,
+.sc-workspace-shell .sc-dialog-card,
+.sc-workspace-shell .sc-float-panel,
+.sc-workspace-shell .sc-queue-hub {
+  border: 1px solid var(--sc-theme-border, var(--sc-border)) !important;
+  background: color-mix(in srgb, var(--sc-surface-1) 96%, transparent) !important;
+  box-shadow: var(--sc-elevation-2) !important;
+  backdrop-filter: blur(18px) saturate(1.08);
+}
+
+/* Tooltips should read as information, not as random black rectangles. */
+.sc-workspace-shell [role="tooltip"] {
+  border: 1px solid var(--sc-divider);
+  border-radius: 8px;
+  background: var(--sc-surface-2);
+  color: var(--sc-text);
+  box-shadow: var(--sc-elevation-2);
+}
+
+/* Light themes: prevent inherited white utility text/backgrounds from making
+   controls look broken. */
+:root[data-ui-theme="arctic"] .sc-workspace-shell [class*="text-white"],
+:root[data-ui-theme="paper"] .sc-workspace-shell [class*="text-white"],
+:root[data-ui-theme="nord"] .sc-workspace-shell [class*="text-white"],
+:root[data-ui-theme="solarized"] .sc-workspace-shell [class*="text-white"] {
+  color: var(--sc-text) !important;
+}
+
+:root[data-ui-theme="arctic"] .sc-workspace-shell [class*="bg-black"],
+:root[data-ui-theme="paper"] .sc-workspace-shell [class*="bg-black"],
+:root[data-ui-theme="nord"] .sc-workspace-shell [class*="bg-black"],
+:root[data-ui-theme="solarized"] .sc-workspace-shell [class*="bg-black"] {
+  background: var(--sc-surface-1) !important;
+}
+
+/* Accessibility: never hide focus, and don't make motion a requirement for understanding state. */
+.sc-workspace-shell button:focus-visible,
+.sc-workspace-shell [role="button"]:focus-visible,
+.sc-workspace-shell input:focus-visible,
+.sc-workspace-shell textarea:focus-visible,
+.sc-workspace-shell select:focus-visible {
+  outline: 2px solid var(--sc-focus-ring) !important;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-workspace-shell *,
+  .sc-workspace-shell *::before,
+  .sc-workspace-shell *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .sc-workspace-shell .sc-app-hint,
+  .sc-workspace-shell .sc-preset-options { display: none !important; }
+  .sc-workspace-shell .sc-workspace-topbar { padding-inline: 8px !important; }
+}

@@ -1884,11 +1884,41 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
         set((s) => ({ settings: { ...s.settings, categorizationMode: mode } })),
     });
 
+const safeLocalStorage = {
+  getItem: (name: string) => localStorage.getItem(name),
+  removeItem: (name: string) => localStorage.removeItem(name),
+  setItem: (name: string, value: string) => {
+    try {
+      localStorage.setItem(name, value);
+      return;
+    } catch (error) {
+      // A large asset/history payload should never make prompt/settings persistence disappear.
+      // Retry with the durable core only; runtime catalogs are reloaded from SwarmUI.
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed && typeof parsed === 'object' && parsed.state && typeof parsed.state === 'object') {
+          const state = parsed.state as Record<string, any>;
+          state.history = Array.isArray(state.history) ? state.history.slice(0, 100) : [];
+          state.queue = Array.isArray(state.queue) ? state.queue.slice(0, 50) : [];
+          state.promptPresets = Array.isArray(state.promptPresets) ? state.promptPresets.slice(0, 50) : [];
+          delete state.galleryHistory;
+          delete state.projectHistory;
+          localStorage.setItem(name, JSON.stringify(parsed));
+          console.warn('[Persistence] Storage quota reached; saved a compact recovery snapshot instead.', error);
+          return;
+        }
+      } catch (retryError) {
+        console.warn('[Persistence] Could not save application state:', retryError);
+      }
+    }
+  },
+};
+
 export const useAppStore = create<AppState>()(
   persist(createAppStore, {
       name: 'swarm_canvas_persisted_store',
       version: 7,
-      storage: createJSONStorage(() => localStorage),
+      storage: createJSONStorage(() => safeLocalStorage),
       // Persisted settings may come from an older build with only a subset of the current
       // settings keys. A shallow Zustand merge would replace the entire settings object and
       // leave newly introduced keys undefined. Deep-merge the settings tree against the current
@@ -1975,12 +2005,9 @@ export const useAppStore = create<AppState>()(
         const preservePromptsAndParams = state.settings.preservePromptsOnReload !== false;
         return {
           serverUrl: state.serverUrl,
-          modelsList: state.modelsList,
-          lorasList: state.lorasList,
-          embeddingsList: state.embeddingsList,
-          yoloModelsList: state.yoloModelsList,
-          vaesList: state.vaesList,
-          textEncodersList: state.textEncodersList,
+          // Asset catalogs are runtime caches and can become large enough to exhaust
+          // localStorage. They are refreshed by loadAssets() on startup instead of being
+          // treated as durable application state.
           ...(preservePromptsAndParams ? {
             prompt: state.prompt,
             negativePrompt: state.negativePrompt,
@@ -2001,6 +2028,12 @@ export const useAppStore = create<AppState>()(
             controlNetUnits: (state.controlNetUnits || []).map((unit) => ({ ...unit, image: unit.image && !unit.image.startsWith('data:') ? unit.image : undefined })),
           } : {}),
           settings: state.settings,
+          // Keep a compact durable history. Full raw SwarmUI metadata is intentionally
+          // omitted because it can be very large and is not required to reopen an image.
+          history: (state.history || []).slice(0, Math.min(1000, state.settings.maxHistoryCount || 1000)).map((item) => ({
+            ...item,
+            rawMetadata: undefined,
+          })),
           emptyBatches: state.emptyBatches,
           promptPresets: state.promptPresets || [],
           lastFailedJob: state.lastFailedJob,
@@ -2011,11 +2044,8 @@ export const useAppStore = create<AppState>()(
             ...(state.activeJob ? [{ ...state.activeJob, status: 'queued' as const }] : []),
             ...state.queue,
           ].slice(0, 200),
-          // Strip heavy base64 data URLs to protect localStorage from hitting the 5MB browser quota
+          // Strip heavy base64 data URLs to protect localStorage from hitting the 5MB browser quota.
           activeImage: state.activeImage && !state.activeImage.startsWith('data:') ? state.activeImage : null,
-          history: (state.history || [])
-            .filter((h) => h.imageUrl && !h.imageUrl.startsWith('data:'))
-            .slice(0, 200),
           // Server gallery is reloaded from SwarmUI when the All Server source is opened.
           // Do not persist the old 100-item server snapshot as though it were the complete
           // server history; SwarmUI's ListImages endpoint is itself server-limited per request.
