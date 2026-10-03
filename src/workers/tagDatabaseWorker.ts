@@ -2,6 +2,8 @@ import { buildWikiGroupHierarchy, DANBOORU_WIKI_GROUPS } from '../api/tagTaxonom
 import type { TagRecord } from '../api/tagTaxonomy';
 import { classifyTagDetailed, SFW_EXACT_MAP, cleanKey } from '../tagging/classifier';
 import type { ClassificationResult } from '../tagging/classifier';
+import { getSemanticPlacements, getPromptFlowPlacements, getPromptRolePlacements, BUILDER_PARENT_ORDER } from '../api/promptBuilderTaxonomies';
+import type { BuilderTaxonomyId } from '../api/promptBuilderTaxonomies';
 
 export interface WorkerAutocompleteItem { name: string; category: string; count: number | null }
 export interface WorkerTagDetail extends TagRecord {
@@ -32,6 +34,7 @@ let records: RichTagRecord[] = [];
 let lookup = new Map<string, RichTagRecord>();
 let hierarchies: Record<Mode, Hierarchy> = { prompt_flow: {}, danbooru_types: {}, danbooru_groups: {} };
 let ready = false;
+let builderIndexes = new Map<BuilderTaxonomyId, Map<string, string[]>>();
 
 export interface Hierarchy { [parent: string]: { [sub: string]: string[] } }
 
@@ -97,6 +100,8 @@ function wikiParentMap(): Map<string, string> {
   return map;
 }
 
+const WIKI_PARENT_MAP = wikiParentMap();
+
 function nativeHierarchy(): Hierarchy {
   const h: Hierarchy = { General: {}, Artist: {}, Character: {}, Copyright: {}, Meta: {} };
   for (const r of records) {
@@ -139,7 +144,7 @@ function modeMeta(record: RichTagRecord) {
   if (mode === 'prompt_flow') return { parent: record.uiCategory, sub: record.uiSubCategory };
   if (mode === 'danbooru_types') return { parent: record.nativeCategory, sub: record.wikiCategory || (record.nativeCategory === 'Meta' ? 'Technical & Medium' : 'All Tags') };
   if (record.wikiCategory) {
-    const parent = wikiParentMap().get(record.wikiCategory);
+    const parent = WIKI_PARENT_MAP.get(record.wikiCategory);
     if (parent) return { parent, sub: record.wikiCategory };
   }
   return { parent: 'Native Categories', sub: record.nativeCategory };
@@ -197,6 +202,84 @@ function stats(sfwFilter: 'all' | 'sfw' | 'nsfw' = 'all') {
   return { parentCategories: parents, parentCounts, subCounts, totalTags: filteredRecords.length };
 }
 
+
+function placementKey(parent: string, sub: string, leaf?: string): string {
+  return `${parent}\u001f${sub}\u001f${leaf || ''}`;
+}
+
+function filterBuilderTags(tags: string[], sfwFilter: 'all' | 'sfw' | 'nsfw'): string[] {
+  if (sfwFilter === 'all') return tags;
+  return tags.filter((tag) => {
+    const record = lookup.get(cleanKey(tag));
+    if (!record) return sfwFilter !== 'nsfw';
+    return sfwFilter === 'nsfw' ? record.isNsfw : !record.isNsfw;
+  });
+}
+
+function getBuilderPlacements(record: RichTagRecord, taxonomy: BuilderTaxonomyId) {
+  if (taxonomy === 'semantic') return getSemanticPlacements(record);
+  if (taxonomy === 'prompt_flow') return getPromptFlowPlacements(record);
+  if (taxonomy === 'anima_roles') return getPromptRolePlacements(record);
+  if (taxonomy === 'danbooru_types') {
+    const parent = record.nativeCategory || 'General';
+    const sub = record.wikiCategory || (parent === 'Meta' ? 'Technical & Medium' : 'All Tags');
+    return [{ parent, sub, leaf: undefined }];
+  }
+
+  if (record.wikiCategory) {
+    const parent = WIKI_PARENT_MAP.get(record.wikiCategory);
+    if (parent) return [{ parent, sub: record.wikiCategory, leaf: undefined }];
+  }
+
+  return [{
+    parent: 'Native Categories',
+    sub: record.nativeCategory || 'General',
+    leaf: undefined,
+  }];
+}
+
+function getBuilderIndex(taxonomy: BuilderTaxonomyId): Map<string, string[]> {
+  const cached = builderIndexes.get(taxonomy);
+  if (cached) return cached;
+
+  const index = new Map<string, string[]>();
+  for (const record of records) {
+    const seen = new Set<string>();
+    for (const placement of getBuilderPlacements(record, taxonomy)) {
+      const parent = placement.parent || 'General';
+      const sub = placement.sub || 'General';
+      const leaf = placement.leaf || '';
+      const key = placementKey(parent, sub, leaf);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const list = index.get(key);
+      if (list) list.push(record.tag);
+      else index.set(key, [record.tag]);
+    }
+  }
+
+  for (const tags of index.values()) {
+    tags.sort((a, b) => {
+      const ac = lookup.get(cleanKey(a))?.postCount ?? -1;
+      const bc = lookup.get(cleanKey(b))?.postCount ?? -1;
+      return bc - ac || a.localeCompare(b);
+    });
+  }
+
+  builderIndexes.set(taxonomy, index);
+  return index;
+}
+
+function orderedBuilderGroups(taxonomy: BuilderTaxonomyId, groups: Array<{ parent: string; sub: string; leaf?: string; count: number }>) {
+  const order = BUILDER_PARENT_ORDER[taxonomy] || [];
+  return groups.sort((a, b) => {
+    const ap = order.indexOf(a.parent);
+    const bp = order.indexOf(b.parent);
+    if (ap !== bp) return (ap < 0 ? 999 : ap) - (bp < 0 ? 999 : bp);
+    return `${a.parent}\u001f${a.sub}\u001f${a.leaf || ''}`.localeCompare(`${b.parent}\u001f${b.sub}\u001f${b.leaf || ''}`);
+  });
+}
+
 function rebuild(sfwFilter: 'all' | 'sfw' | 'nsfw' = 'all') {
   hierarchies[mode] = buildModeHierarchy();
   return stats(sfwFilter);
@@ -218,7 +301,9 @@ self.onmessage = async (e: MessageEvent) => {
       if (typeof csvText !== 'string' || csvText.length < 10) throw new Error('danbooru.csv failed to load or is empty');
 
       const wikiTags: Record<string, string> = catRaw?.tags || {};
+      const wikiByKey = new Map<string, string>(Object.entries(wikiTags).map(([tag, category]) => [cleanKey(tag), String(category)]));
       const descriptions: Record<string, string> = descRaw || {};
+      const descriptionsByKey = new Map<string, string>(Object.entries(descriptions).map(([tag, description]) => [cleanKey(tag), String(description)]));
       const next: RichTagRecord[] = [];
       const seen = new Set<string>();
 
@@ -236,8 +321,8 @@ self.onmessage = async (e: MessageEvent) => {
         const native = CODE_MAP[code] || 'General';
         const parsed = parts[2] === undefined || parts[2].trim() === '' ? null : Number.parseInt(parts[2].trim(), 10);
         const count = Number.isFinite(parsed as number) ? parsed : null;
-        const wiki = wikiTags[tag] ?? wikiTags[key] ?? null;
-        const description = descriptions[key] || descriptions[tag] || null;
+        const wiki = wikiTags[tag] ?? wikiByKey.get(key) ?? null;
+        const description = descriptions[key] || descriptions[tag] || descriptionsByKey.get(key) || null;
         const classification: ClassificationResult = classifyTagDetailed(tag, native, code, wiki, count, description);
 
         next.push({
@@ -286,6 +371,7 @@ self.onmessage = async (e: MessageEvent) => {
 
       records = next;
       lookup = new Map(records.map((r) => [r.normalizedTag, r]));
+      builderIndexes = new Map<BuilderTaxonomyId, Map<string, string[]>>();
       for (const r of records) {
         lookup.set(cleanKey(r.tag), r);
       }
@@ -359,6 +445,118 @@ self.onmessage = async (e: MessageEvent) => {
       );
 
       self.postMessage({ id, success: true, data: list.slice(0, limit) });
+      return;
+    }
+
+    if (type === 'GET_BUILDER_HEALTH') {
+      const sfwFilter = (payload.sfwFilter || 'all') as 'all' | 'sfw' | 'nsfw';
+      const filtered = sfwFilter === 'all' ? records : records.filter((r) => sfwFilter === 'nsfw' ? r.isNsfw : !r.isNsfw);
+      const nativeCounts: Record<string, number> = {};
+      for (const record of filtered) nativeCounts[record.nativeCategory || 'General'] = (nativeCounts[record.nativeCategory || 'General'] || 0) + 1;
+      const semanticPlacements = filtered.map((r) => getSemanticPlacements(r));
+      const placementCount = semanticPlacements.reduce((n, p) => n + p.length, 0);
+      const multiPlacement = semanticPlacements.filter((p) => p.length > 1).length;
+      const lowConfidence = filtered.filter((r) => r.classificationConfidence < 0.75).length;
+      const fallback = filtered.filter((r) => (r.classificationSources || []).some((source) => /fallback|unclassified/i.test(source))).length;
+      self.postMessage({ id, success: true, data: {
+        uniqueTags: filtered.length,
+        nsfwTags: filtered.filter((r) => r.isNsfw).length,
+        sfwTags: filtered.filter((r) => !r.isNsfw).length,
+        semanticPlacements: placementCount,
+        multiPlacement,
+        lowConfidence,
+        fallback,
+        nativeCounts,
+      } });
+      return;
+    }
+
+    if (type === 'GET_BUILDER_GROUPS') {
+      const taxonomy = (payload.taxonomy || 'prompt_flow') as BuilderTaxonomyId;
+      const sfwFilter = (payload.sfwFilter || 'all') as 'all' | 'sfw' | 'nsfw';
+      const index = getBuilderIndex(taxonomy);
+      const groups: Array<{ parent: string; sub: string; leaf?: string; count: number }> = [];
+      for (const [key, tags] of index.entries()) {
+        const [parent, sub, leaf] = key.split('\u001f');
+        const filtered = filterBuilderTags(tags, sfwFilter);
+        if (filtered.length) groups.push({ parent, sub, leaf: leaf || undefined, count: new Set(filtered).size });
+      }
+      const uniqueFiltered = sfwFilter === 'all'
+        ? records.length
+        : records.reduce((count, record) => count + (sfwFilter === 'nsfw' ? (record.isNsfw ? 1 : 0) : (!record.isNsfw ? 1 : 0)), 0);
+      const placementTotal = groups.reduce((sum, group) => sum + group.count, 0);
+      self.postMessage({ id, success: true, data: { taxonomy, sfwFilter, totalTags: uniqueFiltered, placementTotal, groups: orderedBuilderGroups(taxonomy, groups) } });
+      return;
+    }
+
+    if (type === 'GET_BUILDER_TAGS') {
+      const taxonomy = (payload.taxonomy || 'prompt_flow') as BuilderTaxonomyId;
+      const sfwFilter = (payload.sfwFilter || 'all') as 'all' | 'sfw' | 'nsfw';
+      const parent = String(payload.parent || '');
+      const sub = String(payload.sub || '');
+      const leaf = String(payload.leaf || '');
+      const q = cleanKey(payload.search || '');
+      const page = Math.max(1, Math.floor(payload.page || 1));
+      const limit = Math.min(300, Math.max(20, Math.floor(payload.limit || 120)));
+
+      let list: string[];
+      const index = getBuilderIndex(taxonomy);
+      if (parent === 'All' || !parent) {
+        list = records.map((record) => record.tag);
+      } else if (!sub) {
+        // Selecting a parent means all of its subcategories/leaves.
+        list = [];
+        for (const [key, tags] of index.entries()) {
+          if (key.startsWith(`${parent}\u001f`)) list.push(...tags);
+        }
+      } else if (!leaf) {
+        // Selecting a subcategory means all of its leaves.
+        list = [];
+        const prefix = `${parent}\u001f${sub}\u001f`;
+        for (const [key, tags] of index.entries()) {
+          if (key === placementKey(parent, sub, '') || key.startsWith(prefix)) list.push(...tags);
+        }
+      } else {
+        list = index.get(placementKey(parent, sub, leaf)) || [];
+      }
+
+      list = filterBuilderTags([...new Set(list)], sfwFilter);
+      if (q) {
+        const rawQuery = String(payload.search || '').toLowerCase();
+        list = list.filter((tag) => {
+          const key = cleanKey(tag);
+          const record = lookup.get(key);
+          const haystack = `${tag} ${record?.description || ''} ${record?.wikiCategory || ''} ${record?.uiCategory || ''} ${record?.uiSubCategory || ''}`.toLowerCase();
+          return key.includes(q) || haystack.includes(rawQuery);
+        });
+      }
+
+      list.sort((a, b) => {
+        const aCount = lookup.get(cleanKey(a))?.postCount ?? -1;
+        const bCount = lookup.get(cleanKey(b))?.postCount ?? -1;
+        return payload.sort === 'alphabetical' ? a.localeCompare(b) : bCount - aCount || a.localeCompare(b);
+      });
+      const total = list.length;
+      const start = (page - 1) * limit;
+      const pageTags = list.slice(start, start + limit);
+      const tags = pageTags.map((tag) => {
+        const record = lookup.get(cleanKey(tag));
+        return {
+          tag,
+          postCount: record?.postCount ?? null,
+          description: record?.description || null,
+          nativeCategory: record?.nativeCategory || 'General',
+          wikiCategory: record?.wikiCategory || null,
+          uiCategory: record?.uiCategory || null,
+          uiSubCategory: record?.uiSubCategory || null,
+          uiSubSubCategory: record?.uiSubSubCategory || null,
+          secondaryUiCategories: record?.secondaryUiCategories || [],
+          classificationConfidence: record?.classificationConfidence ?? 0,
+          classificationSources: record?.classificationSources || [],
+          isNsfw: Boolean(record?.isNsfw),
+        };
+      });
+      self.postMessage({ id, success: true, data: { tags, total, page, limit, hasMore: start + pageTags.length < total } });
       return;
     }
 

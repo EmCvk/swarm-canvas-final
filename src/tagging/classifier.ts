@@ -1,5 +1,28 @@
 import { CategoryPath, normalizeTag } from '../api/tagTaxonomy';
 
+/** Danbooru wiki categories that are treated as part of the adult/NSFW domain.
+ * These are used only for classification/filtering; semantic taxonomy still
+ * places tags into Anatomy, Actions, Pose, Clothing, etc. where appropriate.
+ */
+export const NSFW_WIKI_CATEGORIES = new Set([
+  'Nudity',
+  'Sex Acts',
+  'Simulated Sex Acts',
+  'Sexual Positions',
+  'Sex Objects',
+  'Sexual Attire',
+  'Bdsm And Torture',
+  'Censorship',
+  'Pussy',
+  'Ass',
+  'Breasts Tags',
+]);
+
+export function isNsfwWikiCategory(category: string | null | undefined): boolean {
+  if (!category) return false;
+  return NSFW_WIKI_CATEGORIES.has(category.trim());
+}
+
 export interface ClassificationResult {
   primary: CategoryPath;
   secondary: CategoryPath[];
@@ -118,6 +141,28 @@ const NSFW_EXACT_MAP: Record<string, string> = {
   bound_arms: 'BDSM & Restraint',
   chain_leash: 'BDSM & Restraint',
 };
+
+// Normalized token-based NSFW vocabulary. This is deliberately boundary-aware
+// so ordinary words that merely contain short fragments do not become NSFW.
+const NSFW_TERMS = [
+  'nsfw','r18','r-18','adult_only','explicit','ecchi','suggestive','risque',
+  'nude','naked','topless','bottomless','completely_nude','exposed','nudity','undressing','stripper',
+  'no_panties','no_bra','pantyshot','upskirt','cameltoe','clothes_lift','shirt_lift','skirt_lift','see_through',
+  'penis','pussy','vagina','vulva','clitoris','anus','anal','areola','nipples','genital','genitals','testicles','scrotum','labia','foreskin','glans','cervix','erection',
+  'sex','sexual','sexuality','intercourse','penetration','masturbation','fellatio','blowjob','cunnilingus','paizuri','creampie','cumshot','internal_cumshot','ejaculation','facial_cum',
+  'fingering','handjob','footjob','groping','fondling','fondle','orgasm','ahegao','moaning','rimming','bukkake','gangbang','group_sex','threesome','foursome','orgy','mating_press','rape','porn','pornographic','pornography','x_rated','xxx',
+  'missionary','cowgirl_position','reverse_cowgirl_position','doggystyle','standing_sex','prone_bone','upright_straddle','m_legs','legs_over_head','symmetrical_docking','asymmetrical_docking',
+  'dildo','vibrator','sex_toy','condom','lubricant','crotchless','pasties','maebari','microbikini','lingerie','sex_object',
+  'bondage','bdsm','shibari','spanking','bit_gag','cleave_gag','bound_wrists','bound_arms','bound_legs','restraint','leash','sexual_assault',
+  'breast_sucking','nipple_suck','nipple_penetration','cum_on','cum_in','facial','golden_shower','voyeurism','exhibitionism','futanari','incest','bestiality','tentacle_sex',
+];
+
+function hasNsfwTerm(clean: string): boolean {
+  return NSFW_TERMS.some((term) => {
+    const key = term.replace(/[^a-z0-9_]+/g, '_');
+    return clean === key || clean.startsWith(`${key}_`) || clean.endsWith(`_${key}`) || clean.includes(`_${key}_`);
+  });
+}
 
 // Normalized SFW Dictionary matching all YAML keys
 export const SFW_EXACT_MAP: Record<string, { parent: string; sub: string }> = {
@@ -441,20 +486,19 @@ export const SFW_EXACT_MAP: Record<string, { parent: string; sub: string }> = {
   signature: { parent: 'Negative Prompt', sub: 'Image' },
 };
 
-const NSFW_PATTERN = /(nsfw|nude|naked|topless|bottomless|completely_nude|crotchless|nipples|areola|pussy|penis|vagina|clitoris|anus|anal|cervix|dildo|vibrator|sex|sexual|penetration|intercourse|masturbation|fellatio|blowjob|cunnilingus|paizuri|creampie|ejaculation|cumshot|facial_cum|fingering|handjob|footjob|oral_invitation|licking_penis|bukkake|gangbang|female_orgasm|ahegao|rape_face|moaning|shibari|bondage|bdsm|tentacle_sex|internal_cumshot|undressing|clothes_lift|skirt_lift|shirt_lift|spanking|groping|self_fondle|crotch_grab|no_panties|no_bra|exposed_)/i;
 
 export function classifyTagDetailed(
   tag: string,
   _nativeCategory?: string,
   nativeCode?: string,
-  _wikiCategory?: string | null,
+  wikiCategory?: string | null,
   _count?: number | null,
   _description?: string | null
 ): ClassificationResult {
   const norm = normalizeTag(tag);
   const clean = cleanKey(norm);
 
-  const isNsfw = clean in NSFW_EXACT_MAP || NSFW_PATTERN.test(clean);
+  const isNsfw = clean in NSFW_EXACT_MAP || hasNsfwTerm(clean) || isNsfwWikiCategory(wikiCategory);
 
   // 1. Explicit NSFW Hit
   if (clean in NSFW_EXACT_MAP) {
@@ -470,15 +514,15 @@ export function classifyTagDetailed(
   // 2. Pattern-based NSFW Fallback
   if (isNsfw) {
     let sub = 'Sex Acts';
-    if (/(nude|naked|topless|bottomless|exposed|lift|undressing|no_panties|no_bra)/.test(clean)) {
+    if (/(nude|naked|topless|bottomless|exposed|lift|undressing|no_panties|no_bra|upskirt|pantyshot|see_through)/.test(clean)) {
       sub = 'Nudity & Exposure';
-    } else if (/(pussy|penis|vagina|clitoris|anus|nipples|areola|cum|ejaculation|testicles)/.test(clean)) {
+    } else if (/(pussy|penis|vagina|clitoris|anus|nipples|areola|cum|ejaculation|testicles|genital|scrotum|labia|foreskin|glans|erection)/.test(clean)) {
       sub = 'Adult Anatomy & Fluids';
-    } else if (/(missionary|doggystyle|cowgirl|straddle|docking|prone_bone)/.test(clean)) {
+    } else if (/(missionary|doggystyle|cowgirl|straddle|docking|prone_bone|spooning|standing_sex|mating_press)/.test(clean)) {
       sub = 'Sexual Positions';
-    } else if (/(crotchless|cutout|pasties|dildo|vibrator|toy)/.test(clean)) {
+    } else if (/(crotchless|cutout|pasties|dildo|vibrator|toy|lingerie|microbikini|condom|lubricant)/.test(clean)) {
       sub = 'Erotic Attire & Fetish';
-    } else if (/(bdsm|shibari|bondage|spanking|restraint|gag)/.test(clean)) {
+    } else if (/(bdsm|shibari|bondage|spanking|restraint|gag|bound_|leash)/.test(clean)) {
       sub = 'BDSM & Restraint';
     }
 

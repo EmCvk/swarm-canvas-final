@@ -4,7 +4,8 @@
   "description": "Capabilities for SwarmCanvas utility popup windows.",
   "windows": [
     "prompt-pills-*",
-    "tag-image-browser-*"
+    "tag-image-browser-*",
+    "anima-prompt-builder"
   ],
   "permissions": [
     "core:default",

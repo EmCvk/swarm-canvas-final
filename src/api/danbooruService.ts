@@ -1,4 +1,5 @@
 import type { CategorizationMode, SortMode } from '../workers/tagDatabaseWorker';
+import type { BuilderFilter, BuilderTaxonomyId } from './promptBuilderTaxonomies';
 export type { CategorizationMode, SortMode };
 
 export interface TagDetail {
@@ -24,6 +25,7 @@ interface Stats { parentCategories: string[]; parentCounts: Record<string, numbe
 interface Pending { resolve: (value:any)=>void; reject: (reason:any)=>void }
 
 export type RemoteTagCategory = 'general' | 'artist' | 'copyright' | 'character' | 'meta' | 'unknown';
+export type RemoteTagCategoryCounts = Partial<Record<Exclude<RemoteTagCategory, 'unknown'>, number | null>>;
 
 export interface RemoteTag {
   id: number;
@@ -33,6 +35,14 @@ export interface RemoteTag {
   postCount: number;
   hasArtist: boolean;
   isDeprecated?: boolean;
+}
+
+export interface RemoteTagPage {
+  tags: RemoteTag[];
+  totalCount: number | null;
+  page: number;
+  limit: number;
+  hasMore: boolean;
 }
 
 export type RemotePostFeed = 'newest' | 'hot' | 'popular-day' | 'popular-week' | 'popular-month' | 'popular-year';
@@ -75,6 +85,40 @@ export interface RemoteWikiPage {
   otherNames?: string[];
 }
 
+
+export interface BuilderGroup { parent: string; sub: string; leaf?: string; count: number }
+export interface BuilderTagResult {
+  tag: string;
+  postCount: number | null;
+  description?: string | null;
+  nativeCategory?: string;
+  wikiCategory?: string | null;
+  uiCategory?: string | null;
+  uiSubCategory?: string | null;
+  uiSubSubCategory?: string | null;
+  secondaryUiCategories?: Array<{ parent: string; sub: string; subSub?: string }>;
+  classificationConfidence?: number;
+  classificationSources?: string[];
+  isNsfw?: boolean;
+}
+export interface BuilderTagsPage {
+  tags: BuilderTagResult[];
+  total: number;
+  page: number;
+  limit: number;
+  hasMore: boolean;
+}
+export interface BuilderHealth {
+  uniqueTags: number;
+  nsfwTags: number;
+  sfwTags: number;
+  semanticPlacements: number;
+  multiPlacement: number;
+  lowConfidence: number;
+  fallback: number;
+  nativeCounts?: Record<string, number>;
+}
+
 const DANBOORU_ORIGIN = 'https://danbooru.donmai.us';
 
 function danbooruCategoryName(category: number): RemoteTagCategory {
@@ -92,14 +136,21 @@ function encodeTagQuery(tag: string): string {
   return tag.trim().toLowerCase().replace(/\s+/g, '_');
 }
 
-async function fetchDanbooruJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+async function fetchDanbooruJsonWithMeta<T>(path: string, signal?: AbortSignal): Promise<{ data: T; totalCount: number | null }> {
   const response = await fetch(`${DANBOORU_ORIGIN}${path}`, {
     method: 'GET',
     headers: { Accept: 'application/json' },
     signal,
   });
   if (!response.ok) throw new Error(`Danbooru HTTP ${response.status}`);
-  return response.json() as Promise<T>;
+  const header = response.headers.get('x-total-count') || response.headers.get('x-total') || null;
+  const totalCount = header != null && Number.isFinite(Number(header)) ? Number(header) : null;
+  return { data: await response.json() as T, totalCount };
+}
+
+async function fetchDanbooruJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const result = await fetchDanbooruJsonWithMeta<T>(path, signal);
+  return result.data;
 }
 
 function mapRemoteTag(raw: any): RemoteTag {
@@ -144,6 +195,8 @@ class DanbooruService {
   private worker: Worker;
   private pending = new Map<number,Pending>();
   private nextId = 1;
+  private remoteWikiCache = new Map<string, RemoteWikiPage | null>();
+  private remoteCategoryCountsCache: RemoteTagCategoryCounts | null = null;
   private loaded = false;
   private callbacks = new Set<() => void>();
   private stats: Stats = { parentCategories: [], parentCounts: {}, subCounts: {}, totalTags: 0 };
@@ -179,18 +232,86 @@ class DanbooruService {
   public async getRandomTags(parent:string,count=2){return this.request<string[]>('GET_RANDOM_TAGS',{parent,count})}
   public async getTagDetails(tags:string[]){return this.request<Array<Partial<TagDetail> & {tag:string; nativeCategory?:string; nativeCategoryCode?:string; postCount?:number|null}>>('GET_DETAILS',{tags})}
   public async setCategorizationMode(mode:CategorizationMode){this.stats=await this.request<Stats>('SET_MODE',{mode})}
-  public async searchRemoteTags(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTag[]> {
+
+  public async getBuilderGroups(taxonomy: BuilderTaxonomyId = 'prompt_flow', sfwFilter: BuilderFilter = 'all'): Promise<{ taxonomy: BuilderTaxonomyId; sfwFilter: BuilderFilter; totalTags: number; placementTotal: number; groups: BuilderGroup[] }> {
+    return this.request('GET_BUILDER_GROUPS', { taxonomy, sfwFilter });
+  }
+
+  public async getBuilderHealth(sfwFilter: BuilderFilter = 'all'): Promise<BuilderHealth> {
+    return this.request('GET_BUILDER_HEALTH', { sfwFilter });
+  }
+
+  public async getBuilderTags(options: {
+    taxonomy?: BuilderTaxonomyId;
+    sfwFilter?: BuilderFilter;
+    parent?: string;
+    sub?: string;
+    leaf?: string;
+    search?: string;
+    sort?: SortMode;
+    page?: number;
+    limit?: number;
+  } = {}): Promise<BuilderTagsPage> {
+    return this.request('GET_BUILDER_TAGS', {
+      taxonomy: options.taxonomy || 'prompt_flow',
+      sfwFilter: options.sfwFilter || 'all',
+      parent: options.parent || 'All',
+      sub: options.sub || '',
+      leaf: options.leaf || '',
+      search: options.search || '',
+      sort: options.sort || 'popularity',
+      page: options.page || 1,
+      limit: options.limit || 120,
+    });
+  }
+  public async getRemoteTagCategoryCounts(signal?: AbortSignal): Promise<RemoteTagCategoryCounts> {
+    if (this.remoteCategoryCountsCache) return this.remoteCategoryCountsCache;
+    const categories: Array<{ key: Exclude<RemoteTagCategory, 'unknown'>; code: number }> = [
+      { key: 'general', code: 0 },
+      { key: 'artist', code: 1 },
+      { key: 'copyright', code: 3 },
+      { key: 'character', code: 4 },
+      { key: 'meta', code: 5 },
+    ];
+    const counts: RemoteTagCategoryCounts = {};
+    await Promise.all(categories.map(async ({ key, code }) => {
+      try {
+        const params = new URLSearchParams();
+        params.set('search[category]', String(code));
+        params.set('search[hide_empty]', 'false');
+        params.set('limit', '1');
+        const result = await fetchDanbooruJsonWithMeta<any[]>(`/tags.json?${params.toString()}`, signal);
+        counts[key] = result.totalCount;
+      } catch (error) {
+        if ((error as any)?.name === 'AbortError') throw error;
+        counts[key] = null;
+      }
+    }));
+    this.remoteCategoryCountsCache = counts;
+    return counts;
+  }
+
+  public async searchRemoteTagsPage(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTagPage> {
     const params = new URLSearchParams();
     const cleaned = query.trim();
     if (cleaned) params.set('search[name_matches]', cleaned.includes('*') ? cleaned : `${cleaned}*`);
     if (options.category !== undefined) params.set('search[category]', String(options.category));
     params.set('search[hide_empty]', 'false');
-    params.set('limit', String(Math.min(100, Math.max(1, options.limit ?? 100))));
-    params.set('page', String(Math.max(1, Math.floor(options.page ?? 1))));
+    const limit = Math.min(1000, Math.max(1, Math.floor(options.limit ?? 1000)));
+    const page = Math.max(1, Math.floor(options.page ?? 1));
+    params.set('limit', String(limit));
+    params.set('page', String(page));
     // Danbooru's tag listing orders are nested under search[order], not a top-level order parameter.
     params.set('search[order]', options.order ?? 'count');
-    const raw = await fetchDanbooruJson<any[]>(`/tags.json?${params.toString()}`, options.signal);
-    return Array.isArray(raw) ? raw.map(mapRemoteTag).filter((tag) => Boolean(tag.name)) : [];
+    const result = await fetchDanbooruJsonWithMeta<any[]>(`/tags.json?${params.toString()}`, options.signal);
+    const tags = Array.isArray(result.data) ? result.data.map(mapRemoteTag).filter((tag) => Boolean(tag.name)) : [];
+    const totalCount = result.totalCount;
+    return { tags, totalCount, page, limit, hasMore: totalCount != null ? page * limit < totalCount : tags.length >= limit };
+  }
+
+  public async searchRemoteTags(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTag[]> {
+    const result = await this.searchRemoteTagsPage(query, options);
+    return result.tags;
   }
 
   public async getRemotePosts(
@@ -273,11 +394,19 @@ class DanbooruService {
 
   public async getRemoteWiki(tag: string, signal?: AbortSignal): Promise<RemoteWikiPage | null> {
     const normalized = encodeTagQuery(tag);
+    if (this.remoteWikiCache.has(normalized)) return this.remoteWikiCache.get(normalized) || null;
     try {
       const raw = await fetchDanbooruJson<any>(`/wiki_pages/${encodeURIComponent(normalized)}.json`, signal);
-      if (!raw) return null;
-      return { title: String(raw?.title || normalized), body: typeof raw?.body === 'string' ? raw.body : undefined, otherNames: Array.isArray(raw?.other_names) ? raw.other_names.map(String) : undefined };
-    } catch {
+      if (!raw) { this.remoteWikiCache.set(normalized, null); return null; }
+      const page = {
+        title: String(raw?.title || normalized),
+        body: typeof raw?.body === 'string' ? raw.body : undefined,
+        otherNames: Array.isArray(raw?.other_names) ? raw.other_names.map(String) : undefined,
+      };
+      this.remoteWikiCache.set(normalized, page);
+      return page;
+    } catch (error) {
+      if ((error as any)?.name === 'AbortError') throw error;
       return null;
     }
   }

@@ -168,6 +168,49 @@ const openPromptPillsPopup = async () => {
   }
 };
 
+const openAnimaPromptBuilderPopup = async () => {
+  if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) {
+    emitToast('Anima Prompt Builder popup is available in the Tauri desktop app.', 'warning');
+    return;
+  }
+  const label = 'anima-prompt-builder';
+  try {
+    const current = useAppStore.getState();
+    window.localStorage.setItem('swarm_anima_builder_sync_v1', JSON.stringify({
+      positive: current.prompt,
+      negative: current.negativePrompt,
+      updatedAt: Date.now(),
+    }));
+
+    const existing = await WebviewWindow.getByLabel(label);
+    if (existing) {
+      await existing.show().catch(() => undefined);
+      await existing.unminimize().catch(() => undefined);
+      await existing.setFocus().catch(() => undefined);
+      return;
+    }
+
+    const popup = new WebviewWindow(label, {
+      url: '/?popup=anima-prompt-builder',
+      title: 'SwarmCanvas — Anima Prompt Builder',
+      width: 1400,
+      height: 900,
+      minWidth: 980,
+      minHeight: 640,
+      resizable: true,
+      center: true,
+    });
+    void popup.once('tauri://error', (event) => {
+      console.error('[Workspace] Anima Prompt Builder popup error:', event);
+      emitToast('Anima Prompt Builder failed to open.', 'error');
+    });
+  } catch (error) {
+    console.error('[Workspace] Could not open Anima Prompt Builder popup:', error);
+    emitToast(`Could not open Anima Prompt Builder: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  }
+};
+
+
 const requestGenerationViewer = (item: HistoryItem) => {
   useAppStore.getState().setGenerationViewerItem(item);
   try {
@@ -2585,6 +2628,24 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+  // Keep the standalone Anima Prompt Builder window synchronized with the main prompt editor.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== 'swarm_anima_builder_sync_v1' || !event.newValue) return;
+      try {
+        const payload = JSON.parse(event.newValue) as { positive?: string; negative?: string };
+        if (typeof payload.positive === 'string' && payload.positive !== useAppStore.getState().prompt) {
+          setPrompt(payload.positive);
+        }
+        if (typeof payload.negative === 'string' && payload.negative !== useAppStore.getState().negativePrompt) {
+          setNegativePrompt(payload.negative);
+        }
+      } catch {}
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [setPrompt, setNegativePrompt]);
+
   // Recovery snapshot protects the editor from a transient store/layout remount.
   useEffect(() => {
     if (settings.preservePromptsOnReload === false) return;
@@ -2961,7 +3022,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   // 3-way layout switch: 'split' = default (both), 'tags_only' = only tags, 'prompts_only' = only prompts
 
-  const [panelLayoutMode, setPanelLayoutMode] = useLocalState<'split' | 'tags_only' | 'prompts_only'>('swarm_prompt_layout_mode_v2', 'split');
+  const [panelLayoutMode, setPanelLayoutMode] = useLocalState<'split' | 'tags_only' | 'prompts_only'>('swarm_prompt_layout_mode_v3', 'split');
 
 
 
@@ -3084,6 +3145,9 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
   const pillClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPillEditOnBlurRef = useRef(false);
+  const editingPillWasMutedRef = useRef(false);
+  useEffect(() => () => { if (pillClickTimeoutRef.current) clearTimeout(pillClickTimeoutRef.current); }, []);
 
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -3976,13 +4040,34 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
+  const startPromptboxPillEdit = (target: 'positive' | 'negative', index: number) => {
+    const token = getPromptTokens(target)[index];
+    if (token === undefined || token === '\n' || token === 'BREAK') return;
+    const muted = token.startsWith('/*') && token.endsWith('*/');
+    const cleanToken = muted
+      ? token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim()
+      : token;
+    editingPillWasMutedRef.current = muted;
+    cancelPillEditOnBlurRef.current = false;
+    setEditingIndex({ target, index });
+    setEditingText(cleanToken);
+  };
+
   const submitPromptboxEdit = (target: 'positive' | 'negative', index: number) => {
+
+    if (cancelPillEditOnBlurRef.current) {
+      cancelPillEditOnBlurRef.current = false;
+      editingPillWasMutedRef.current = false;
+      setEditingIndex(null);
+      return;
+    }
 
     const tokens = getPromptTokens(target);
 
     if (editingText.trim()) {
 
-      tokens[index] = editingText.trim();
+      const cleanText = editingText.trim();
+      tokens[index] = editingPillWasMutedRef.current ? `/* ${cleanText} */` : cleanText;
 
     } else {
 
@@ -3992,6 +4077,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     setPromptTokens(target, tokens);
 
+    editingPillWasMutedRef.current = false;
     setEditingIndex(null);
 
   };
@@ -4795,6 +4881,15 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     });
   };
 
+  const setAllPromptSectionsCollapsed = (target: 'positive' | 'negative', collapsed: boolean) => {
+    const sectionCount = getPromptSectionTexts(target).length;
+    setCollapsedPromptSections((prev) => ({
+      ...prev,
+      [target]: collapsed ? Array.from({ length: sectionCount }, (_, index) => index) : [],
+    }));
+    if (collapsed) setFocusedPromptSection((prev) => ({ ...prev, [target]: null }));
+  };
+
   const focusPromptSection = (target: 'positive' | 'negative', index: number | null) => {
     if (index === null) {
       setFocusedPromptSection((prev) => ({ ...prev, [target]: null }));
@@ -5231,6 +5326,27 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         >
           <Plus className="w-3 h-3" />
         </button>
+        {sections.length > 1 && (
+          <>
+            <span className="w-px h-3 bg-white/8 shrink-0" aria-hidden="true" />
+            <button
+              type="button"
+              onClick={() => setAllPromptSectionsCollapsed(target, true)}
+              className="px-1.5 py-0.5 rounded text-[8px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-white/5 cursor-pointer shrink-0"
+              title="Collapse all prompt sections"
+            >
+              Collapse
+            </button>
+            <button
+              type="button"
+              onClick={() => setAllPromptSectionsCollapsed(target, false)}
+              className="px-1.5 py-0.5 rounded text-[8px] font-mono text-zinc-500 hover:text-zinc-200 hover:bg-white/5 cursor-pointer shrink-0"
+              title="Expand all prompt sections"
+            >
+              Expand
+            </button>
+          </>
+        )}
         <div className="flex-1" />
         <span className="hidden lg:inline text-[8px] font-mono text-zinc-600 shrink-0">
           {focused === null ? 'All sections' : `Editing section ${focused + 1}`}
@@ -5342,6 +5458,17 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             return;
           }
 
+          if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            setAllPromptSectionsCollapsed(target, true);
+            return;
+          }
+          if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'e') {
+            e.preventDefault();
+            setAllPromptSectionsCollapsed(target, false);
+            return;
+          }
+
           if (e.altKey && e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
             const sections = getPromptSectionTexts(target);
             const current = focusedPromptSection[target];
@@ -5430,8 +5557,8 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             {settings.showPromptSectionHeaders !== false &&
               renderPromptSectionHeader(target, row.lineIndex, sectionText, isCollapsed)}
 
-            {!isCollapsed && (
-              <>
+            <div className={`sc-collapse-vertical sc-prompt-section-region ${isCollapsed ? '' : 'is-open'}`} aria-hidden={isCollapsed}>
+              <div className="sc-collapse-inner w-full">
                 {/* Tag Row: Clean wrapping with uniform gap and no vertical overlap */}
 
                 <div
@@ -5703,12 +5830,9 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                         }
 
-                        if (settings.doubleClickEditPromptPills !== false) {
-                          setEditingIndex({ target, index: idx });
-                          setEditingText(token);
-                        } else {
-                          toggleTokenMutedAt(target, idx);
-                        }
+                        // Double-click is the explicit enable/disable gesture. The setting
+                        // from older versions remains only for migration compatibility.
+                        toggleTokenMutedAt(target, idx);
 
                       }}
 
@@ -5716,43 +5840,40 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                         e.stopPropagation();
 
-                        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-
-                        if (e.clientX - rect.left <= 16) {
-
-                          setActiveInsertion({ target, index: idx });
-
-                          setInsertTagInput('');
-
-                          return;
-
-                        }
-
-
-
-
+                        if (e.ctrlKey || e.metaKey || e.shiftKey) return;
 
                         if (pillClickTimeoutRef.current) {
 
                           clearTimeout(pillClickTimeoutRef.current);
 
                         }
-
                         pillClickTimeoutRef.current = setTimeout(() => {
 
                           pillClickTimeoutRef.current = null;
+                          cancelPillEditOnBlurRef.current = false;
+                          startPromptboxPillEdit(target, idx);
 
-                          setEditingIndex({ target, index: idx });
-
-                          setEditingText(token);
-
-                        }, 280);
+                        }, 360);
 
                       }}
 
                       onContextMenu={(e) => handlePromptboxPillContextMenu(target, idx, token, e)}
 
-                      className={`sc-prompt-pill px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
+                      role="button"
+                      tabIndex={isCurrentlyEditing ? -1 : 0}
+                      aria-label={`${displayLabel}${showWeightBadge ? `, weight ${weightVal.toFixed(2)}` : ''}${isMuted ? ', disabled' : ''}. Click to edit. Double-click to ${isMuted ? 'enable' : 'disable'}.`}
+                      onKeyDown={(e) => {
+                        if (isCurrentlyEditing) return;
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          cancelPillEditOnBlurRef.current = false;
+                          startPromptboxPillEdit(target, idx);
+                        } else if (e.key === ' ') {
+                          e.preventDefault();
+                          toggleTokenMutedAt(target, idx);
+                        }
+                      }}
+                      className={`sc-prompt-pill ${isCurrentlyEditing ? 'sc-prompt-pill--editing' : ''} px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
 
                         isMuted
 
@@ -5778,7 +5899,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                       }`}
 
-                      title={isLoraPill ? 'Click: Select • Double click: Edit • Scroll: Adjust LoRA weight • Right click: Actions' : 'Click: Select • Ctrl/Cmd+click: Multi-select • Double click: Edit • Scroll: Weight • Right click: Actions'}
+                      title={isLoraPill ? 'Click: Edit • Double-click: Disable/enable • Scroll: Adjust LoRA weight • Right click: Actions' : 'Click: Edit • Ctrl/Cmd+click: Multi-select • Double-click: Disable/enable • Scroll: Weight • Right click: Actions'}
 
                     >
 
@@ -5802,7 +5923,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                             if (e.key === 'Enter') { e.preventDefault(); submitPromptboxEdit(target, idx); }
 
-                            if (e.key === 'Escape') { e.preventDefault(); setEditingIndex(null); }
+                            if (e.key === 'Escape') { e.preventDefault(); cancelPillEditOnBlurRef.current = true; setEditingIndex(null); }
 
                           }}
 
@@ -5814,7 +5935,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           onDoubleClick={(e) => e.stopPropagation()}
 
-                          className="bg-transparent text-white p-0 m-0 outline-none border-none text-[11px] font-mono leading-tight select-text"
+                          className="sc-prompt-pill-edit-input bg-transparent text-white p-0 m-0 outline-none border-none text-[11px] font-mono leading-tight select-text"
 
                         />
 
@@ -6039,8 +6160,8 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   </div>
 
                 )}
-              </>
-            )}
+              </div>
+            </div>
           </div>
 
           );
@@ -6166,6 +6287,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         <div className="flex items-center gap-1">
 
           <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'slots' ? null : 'slots')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'slots' ? 'bg-[#3a301f] text-[#efd18f]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>Slots</button>
+          <button type="button" onClick={() => { setPromptToolsOpen(null); void openAnimaPromptBuilderPopup(); }} className="sc-prompt-builder-trigger px-2.5 py-1 rounded-md text-[10px] font-semibold cursor-pointer flex items-center gap-1.5" title="Open the detailed Anima/Qwen prompt builder"><Wand2 className="w-3 h-3" />Builder</button>
 
           <button type="button" onClick={() => setPromptToolsOpen(promptToolsOpen === 'history' ? null : 'history')} className={`px-2 py-1 rounded-md text-[10px] font-mono cursor-pointer ${promptToolsOpen === 'history' ? 'bg-[#2a3033] text-[#b6dbe8]' : 'text-[#9d978e] hover:bg-white/[0.04] hover:text-[#eeeae2]'}`}>History</button>
 
@@ -13272,6 +13394,7 @@ export const Workspace: React.FC = () => {
 
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
+
   const [isReconnecting, setIsReconnecting] = useState(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastConnectionProbeRef = useRef(0);
@@ -13888,6 +14011,7 @@ export const Workspace: React.FC = () => {
     { id: 'models', label: 'Open Extra Networks', description: 'Browse models, LoRAs, embeddings and wildcards', icon: defaultCommandIcons.models, action: () => addPanel('extranetworks', 'Extra Networks') },
 
     { id: 'prompt-pills-popout', label: 'Open Prompt Pills popup', description: 'Open Prompt Pills in a separate window', icon: defaultCommandIcons.models, action: () => void openPromptPillsPopup() },
+    { id: 'prompt-builder', label: 'Open Anima Prompt Builder', description: 'Build a detailed Anima/Qwen prompt from curated tag libraries', icon: defaultCommandIcons.models, action: () => void openAnimaPromptBuilderPopup() },
 
     { id: 'civitai-library', label: 'Open Civitai Library', description: 'Inspect metadata health, unresolved assets and cached previews', icon: defaultCommandIcons.models, action: () => addPanel('civitailibrary', 'Civitai Library') },
     { id: 'studio-tools', label: 'Open Studio Tools', description: 'Generation matrix, image guidance, prompt syntax, metadata and variations', icon: defaultCommandIcons.models, action: () => addPanel('studioutils', 'Studio Tools') },
@@ -14775,7 +14899,7 @@ export const Workspace: React.FC = () => {
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show section statistics</span><span className="sc-setting-help">Shows tag count, character count, and LoRA count in section headers on larger panels.</span></span><input type="checkbox" checked={settings.showPromptSectionStats !== false} onChange={(e) => updateSettings({ showPromptSectionStats: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show selection toolbar</span><span className="sc-setting-help">Shows bulk weight, mute, move, copy, section, and delete controls when tags are selected.</span></span><input type="checkbox" checked={settings.showPromptSelectionToolbar !== false} onChange={(e) => updateSettings({ showPromptSelectionToolbar: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Enable SwarmUI syntax quick insert</span><span className="sc-setting-help">Adds one-click Random, Alternate, From-To, Wildcard, Repeat, Embed, Comment, and Param snippets.</span></span><input type="checkbox" checked={settings.promptSyntaxQuickInsert !== false} onChange={(e) => updateSettings({ promptSyntaxQuickInsert: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
-                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Double-click edits prompt pills</span><span className="sc-setting-help">Double-click enters text editing. Use the right-click menu to disable/comment a tag.</span></span><input type="checkbox" checked={settings.doubleClickEditPromptPills !== false} onChange={(e) => updateSettings({ doubleClickEditPromptPills: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <div className="sc-setting-card"><span><span className="sc-setting-label">Prompt pill gestures</span><span className="sc-setting-help">Click a pill to edit it. Double-click to disable/enable it. While editing, double-click a word for normal Windows-style word selection. The legacy double-click editing setting is preserved only for migration compatibility.</span></span><span className="sc-setting-badge">Click / Double-click</span></div>
                     </div></div>
                   </>
                 )}
@@ -14871,7 +14995,11 @@ export const Workspace: React.FC = () => {
 
                   ['Double-click a tag', 'Mute / re-enable the tag'],
 
+                  ['Double-click while editing', 'Select the word under the pointer'],
+
                   ['Drag a tag', 'Reorder, or drag across tags to multi-select'],
+
+                  ['Alt + Shift + C / E', 'Collapse / expand all prompt sections'],
 
                   ['Enter / ,', 'Commit the tag you are typing'],
 
@@ -15060,6 +15188,7 @@ export const Workspace: React.FC = () => {
       {/* Diagnostics & Interactive Debug Console Component */}
 
       <DebugConsole open={showConsole} onClose={() => setShowConsole(false)} />
+
 
     </div>
 

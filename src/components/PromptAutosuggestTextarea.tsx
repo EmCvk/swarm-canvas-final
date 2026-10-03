@@ -51,17 +51,21 @@ function parsePromptStringToPills(promptStr: string): ParsedPill[] {
     .filter(Boolean);
 
   return rawTokens.map((token, index) => {
-    let cleanText = token;
+    const normalizedToken = token.trim();
+    const isMuted = normalizedToken.startsWith('/*') && normalizedToken.endsWith('*/');
+    let cleanText = isMuted
+      ? normalizedToken.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim()
+      : normalizedToken;
     let weight = 1.0;
 
-    if (isLoraToken(token)) {
+    if (isLoraToken(cleanText)) {
       // LoRA/LyCORIS tags carry their weight inside the tag itself
       // (`<lora:Name:1.2>`), not via an outer paren-weight wrapper.
-      const loraParsed = parseWeightedToken(token);
+      const loraParsed = parseWeightedToken(cleanText);
       cleanText = loraParsed.base;
       weight = loraParsed.weight;
     } else {
-      const weightedMatch = token.match(/^\((.+?):([0-9.]+)\)$/);
+      const weightedMatch = cleanText.match(/^\((.+?):([0-9.]+)\)$/);
       if (weightedMatch) {
         cleanText = weightedMatch[1].trim();
         weight = parseFloat(weightedMatch[2]) || 1.0;
@@ -95,7 +99,7 @@ function parsePromptStringToPills(promptStr: string): ParsedPill[] {
       id: `${index}-${cleanText}`,
       text: cleanText,
       weight,
-      enabled: true,
+      enabled: !isMuted,
       category,
     };
   });
@@ -103,16 +107,20 @@ function parsePromptStringToPills(promptStr: string): ParsedPill[] {
 
 function serializePillsToPrompt(pills: ParsedPill[]): string {
   return pills
-    .filter((p) => p.enabled !== false && p.text.trim())
+    .filter((p) => p.text.trim())
     .map((p) => {
       const clean = p.text.trim();
+      let serialized: string;
       if (p.category === 'lora' && isLoraToken(clean)) {
         // Re-embed the (possibly wheel-adjusted) weight into the lora tag itself
         // rather than wrapping the whole tag in an outer paren-weight.
-        return formatWeightedToken(parseWeightedToken(clean), p.weight);
+        serialized = formatWeightedToken(parseWeightedToken(clean), p.weight);
+      } else if (p.weight === 1.0) {
+        serialized = clean;
+      } else {
+        serialized = `(${clean}:${Number(p.weight.toFixed(2))})`;
       }
-      if (p.weight === 1.0) return clean;
-      return `(${clean}:${Number(p.weight.toFixed(2))})`;
+      return p.enabled === false ? `/* ${serialized} */` : serialized;
     })
     .join(', ');
 }
@@ -137,6 +145,11 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [scrollWeightEnabled, setScrollWeightEnabled] = useState(true);
+  const pillClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPillEditOnBlurRef = useRef(false);
+  useEffect(() => () => {
+    if (pillClickTimeoutRef.current) clearTimeout(pillClickTimeoutRef.current);
+  }, []);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -274,6 +287,7 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
   };
 
   const startEditPill = (index: number) => {
+    cancelPillEditOnBlurRef.current = false;
     setEditingIndex(index);
     const p = pills[index];
     if (p.category === 'lora' && isLoraToken(p.text)) {
@@ -284,6 +298,12 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
   };
 
   const finishEditPill = (index: number) => {
+    if (cancelPillEditOnBlurRef.current) {
+      cancelPillEditOnBlurRef.current = false;
+      setEditingIndex(null);
+      setEditingText('');
+      return;
+    }
     if (editingText.trim()) {
       const parsed = parsePromptStringToPills(editingText);
       if (parsed.length > 0) {
@@ -393,7 +413,23 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                 className="shrink-0 max-w-52 inline-flex items-center gap-1 rounded-md bg-fuchsia-500/10 border border-fuchsia-500/20 px-1.5 py-0.5 text-[9px] font-mono text-fuchsia-200 hover:bg-fuchsia-500/15"
                 title="Wheel to change LoRA weight; double-click to edit"
                 onWheel={(event) => handlePillWheel(event, index)}
-                onDoubleClick={() => startEditPill(index)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (pillClickTimeoutRef.current) clearTimeout(pillClickTimeoutRef.current);
+                  pillClickTimeoutRef.current = setTimeout(() => {
+                    pillClickTimeoutRef.current = null;
+                    startEditPill(index);
+                  }, 360);
+                }}
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (pillClickTimeoutRef.current) {
+                    clearTimeout(pillClickTimeoutRef.current);
+                    pillClickTimeoutRef.current = null;
+                  }
+                  togglePillEnabled(index);
+                }}
               >
                 <span className="truncate">{loraDisplayName(parsed.loraName || pill.text)}</span>
                 <span className="text-fuchsia-300">×{pill.weight.toFixed(2)}</span>
@@ -450,12 +486,13 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                     }
                     if (e.key === 'Escape') {
                       e.preventDefault();
+                      cancelPillEditOnBlurRef.current = true;
                       setEditingIndex(null);
                       setEditingText('');
                     }
                   }}
                   onBlur={() => finishEditPill(index)}
-                  className="px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none w-28 font-mono select-text"
+                  className="sc-prompt-pill-edit-input px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none w-28 font-mono select-text"
                 />
               );
             }
@@ -475,23 +512,50 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                 onMouseLeave={() => {
                   if (hoveredPillIndex === index) setHoveredPillIndex(null);
                 }}
-                className={`group relative flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] select-none transition-all ${
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (pillClickTimeoutRef.current) {
+                    clearTimeout(pillClickTimeoutRef.current);
+                    pillClickTimeoutRef.current = null;
+                  }
+                  togglePillEnabled(index);
+                }}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+                  if (pillClickTimeoutRef.current) clearTimeout(pillClickTimeoutRef.current);
+                  pillClickTimeoutRef.current = setTimeout(() => {
+                    pillClickTimeoutRef.current = null;
+                    startEditPill(index);
+                  }, 360);
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label={`${pill.text}${pill.weight !== 1 ? `, weight ${pill.weight.toFixed(2)}` : ''}${pill.enabled ? '' : ', disabled'}. Click to edit. Double-click to ${pill.enabled ? 'disable' : 'enable'}.`}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    startEditPill(index);
+                  } else if (event.key === ' ') {
+                    event.preventDefault();
+                    togglePillEnabled(index);
+                  }
+                }}
+                className={`sc-prompt-pill group relative flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] select-none transition-all ${
                   pill.enabled
                     ? `${styles.bg} ${styles.border} ${styles.text}`
                     : 'bg-zinc-900/60 border-zinc-800 text-zinc-500 opacity-60 line-through'
                 } hover:border-indigo-400`}
                 title={
                   scrollWeightEnabled
-                    ? 'Mouse scroll over pill to adjust weight (+/- 0.05). Double-click to edit.'
-                    : 'Double-click to edit.'
+                    ? 'Click to edit • Double-click to disable/enable • Scroll to adjust weight.'
+                    : 'Click to edit • Double-click to disable/enable.'
                 }
               >
                 <span className={`w-1.5 h-1.5 rounded-full ${styles.dot} shrink-0`} />
 
-                <span
-                  onDoubleClick={() => startEditPill(index)}
-                  className="cursor-pointer max-w-48 truncate"
-                >
+                <span className="cursor-pointer max-w-48 truncate">
                   {pill.category === 'lora' && isLoraToken(pill.text)
                     ? loraDisplayName(parseWeightedToken(pill.text).loraName || pill.text)
                     : pill.text}

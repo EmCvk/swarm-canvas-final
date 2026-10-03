@@ -2374,3 +2374,131 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   .sc-workspace-shell .sc-preset-options { display: none !important; }
   .sc-workspace-shell .sc-workspace-topbar { padding-inline: 8px !important; }
 }
+
+
+/* Animated prompt disclosures and predictable keyboard focus. */
+.sc-collapse-vertical.sc-prompt-section-region {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: grid-template-rows .24s cubic-bezier(.2,.75,.25,1), opacity .18s ease;
+}
+.sc-collapse-vertical.sc-prompt-section-region.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.sc-prompt-section-region > .sc-collapse-inner {
+  min-height: 0;
+  overflow: visible;
+}
+.sc-prompt-pill[role="button"]:focus-visible {
+  outline: 2px solid var(--sc-focus-ring) !important;
+  outline-offset: 2px;
+}
+.sc-prompt-pill-edit-input {
+  min-width: 8ch;
+  max-width: min(54ch, 60vw);
+  color: var(--sc-text) !important;
+  caret-color: var(--sc-gold) !important;
+  user-select: text !important;
+}
+.sc-prompt-pill-edit-input::selection {
+  background: color-mix(in srgb, var(--sc-gold) 35%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sc-collapse-vertical.sc-prompt-section-region { transition: none; }
+}
+
+
+/* Prompt pill interaction states: editing is intentionally calmer than hover. */
+.sc-prompt-pill {
+  transition: transform .12s ease, background-color .16s ease, border-color .16s ease, box-shadow .16s ease, opacity .16s ease;
+}
+.sc-prompt-pill:hover {
+  transform: translateY(-1px);
+}
+.sc-prompt-pill:active {
+  transform: translateY(0);
+}
+.sc-prompt-pill--editing {
+  cursor: text !important;
+  transform: none !important;
+  border-color: color-mix(in srgb, var(--sc-gold) 70%, var(--sc-border)) !important;
+  background: color-mix(in srgb, var(--sc-surface-3) 92%, var(--sc-gold) 8%) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sc-gold) 20%, transparent), 0 6px 18px color-mix(in srgb, var(--sc-gold) 8%, transparent);
+}
+.sc-prompt-pill-edit-input {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.sc-setting-badge {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 3px 7px;
+  border: 1px solid var(--sc-divider);
+  border-radius: 999px;
+  color: var(--sc-text-muted);
+  background: color-mix(in srgb, var(--sc-surface-2) 75%, transparent);
+  font: 600 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .03em;
+}
+
+/* Compact disclosure language for dense settings/tool regions. */
+.sc-settings-section {
+  scroll-margin-top: 12px;
+}
+.sc-settings-section > :first-child {
+  border-radius: 10px;
+}
+.sc-settings-section > :first-child:focus-visible {
+  outline: 2px solid var(--sc-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Make empty prompt space feel like an editor rather than a blank panel. */
+.sc-prompt-section-region:not(.is-open) {
+  pointer-events: none;
+}
+.sc-prompt-section-region.is-open {
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-prompt-pill { transition: none; }
+  .sc-prompt-pill:hover, .sc-prompt-pill:active { transform: none; }
+}
+
+
+/* Prompt Builder controls: theme-token based so every active theme inherits the same UX. */
+.sc-theme-input, .sc-theme-select { color: var(--sc-text) !important; }
+.sc-theme-input::placeholder { color: var(--sc-text-dim); }
+.sc-theme-input:focus, .sc-theme-select:focus {
+  border-color: var(--sc-theme-border) !important;
+  box-shadow: 0 0 0 2px var(--sc-gold-soft);
+}
+.sc-prompt-builder-trigger {
+  color: var(--sc-gold-strong);
+  background: var(--sc-gold-soft);
+  border: 1px solid var(--sc-theme-border) !important;
+  transition: background .16s ease, color .16s ease, transform .16s ease;
+}
+.sc-prompt-builder-trigger:hover { color: var(--sc-text); background: var(--sc-gold-soft); transform: translateY(-1px); }
+.sc-builder-action {
+  display: inline-flex; align-items: center; justify-content: flex-start; gap: 6px; min-height: 28px;
+  border: 1px solid var(--sc-border) !important; border-radius: 8px; padding: 0 9px;
+  background: var(--sc-surface-2); color: var(--sc-text-secondary); font-size: 10px; cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+}
+.sc-builder-action:hover { background: var(--sc-surface-3); color: var(--sc-text); border-color: var(--sc-theme-border) !important; transform: translateY(-1px); }
+.sc-icon-button {
+  width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--sc-border) !important; border-radius: 8px; background: var(--sc-surface-2); color: var(--sc-text-muted);
+  cursor: pointer; transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+}
+.sc-icon-button:hover { background: var(--sc-surface-3); color: var(--sc-text); border-color: var(--sc-theme-border) !important; transform: translateY(-1px); }
+@keyframes sc-pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@media (prefers-reduced-motion: reduce) { .sc-prompt-builder-trigger, .sc-builder-action, .sc-icon-button { transition: none !important; } }

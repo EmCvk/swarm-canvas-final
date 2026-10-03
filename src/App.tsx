@@ -3,12 +3,21 @@ import { Activity, Film, Image as ImageIcon } from 'lucide-react';
 import { Workspace, PromptPillsPanel } from './components/Workspace';
 import { TagImageBrowserPanel } from './components/TagImageBrowserPanel';
 import { AnimationLab } from './components/AnimationLab';
+import { PromptBuilderModal } from './components/PromptBuilderModal';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 type AppTab = 'canvas' | 'animation';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AppTab>('canvas');
   const popup = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('popup') : null;
+  if (popup === 'anima-prompt-builder') {
+    return (
+      <div className="w-screen h-screen overflow-hidden bg-[#07080b]">
+        <PromptBuilderModal open={true} onClose={() => { void getCurrentWindow().close(); }} />
+      </div>
+    );
+  }
   if (popup === 'prompt-pills') {
     return (
       <div className="w-screen h-screen overflow-hidden bg-[#07080b]">
