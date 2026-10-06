@@ -197,6 +197,8 @@ class DanbooruService {
   private nextId = 1;
   private remoteWikiCache = new Map<string, RemoteWikiPage | null>();
   private remoteCategoryCountsCache: RemoteTagCategoryCounts | null = null;
+  // Session cache: survives category/search changes and is discarded naturally when Swarm Canvas closes.
+  private remoteTagPageCache = new Map<string, RemoteTagPage>();
   private loaded = false;
   private callbacks = new Set<() => void>();
   private stats: Stats = { parentCategories: [], parentCounts: {}, subCounts: {}, totalTags: 0 };
@@ -229,6 +231,17 @@ class DanbooruService {
     return {tag:detail.tag,subCategory:detail.modeSub,postCount:detail.postCount,description:detail.description||undefined,nativeCategory:detail.nativeCategory,nativeCategoryCode:detail.nativeCategoryCode,wikiCategory:detail.wikiCategory,uiCategory:detail.uiCategory,uiSubCategory:detail.uiSubCategory,uiSubSubCategory:detail.uiSubSubCategory,secondaryUiCategories:detail.secondaryUiCategories,classificationConfidence:detail.classificationConfidence,classificationSources:detail.classificationSources,modeParent:detail.modeParent,modeSub:detail.modeSub};
   }
   public async searchAutocomplete(query:string,limit=8){const items=await this.request<Array<{name:string;category:string;count:number|null}>>('SEARCH',{query,limit});return items.map(item=>({name:item.name,category:item.category,count:item.count}))}
+  public async searchBuilderAutocomplete(options: { taxonomy?: BuilderTaxonomyId; sfwFilter?: BuilderFilter; parent?: string; sub?: string; leaf?: string; query: string; limit?: number }): Promise<BuilderTagResult[]> {
+    return this.request('SEARCH_BUILDER_AUTOCOMPLETE', {
+      taxonomy: options.taxonomy || 'prompt_flow',
+      sfwFilter: options.sfwFilter || 'all',
+      parent: options.parent || 'All',
+      sub: options.sub || '',
+      leaf: options.leaf || '',
+      query: options.query || '',
+      limit: options.limit || 12,
+    });
+  }
   public async getRandomTags(parent:string,count=2){return this.request<string[]>('GET_RANDOM_TAGS',{parent,count})}
   public async getTagDetails(tags:string[]){return this.request<Array<Partial<TagDetail> & {tag:string; nativeCategory?:string; nativeCategoryCode?:string; postCount?:number|null}>>('GET_DETAILS',{tags})}
   public async setCategorizationMode(mode:CategorizationMode){this.stats=await this.request<Stats>('SET_MODE',{mode})}
@@ -294,7 +307,7 @@ class DanbooruService {
   public async searchRemoteTagsPage(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTagPage> {
     const params = new URLSearchParams();
     const cleaned = query.trim();
-    if (cleaned) params.set('search[name_matches]', cleaned.includes('*') ? cleaned : `${cleaned}*`);
+    if (cleaned) params.set('search[name_matches]', cleaned.includes('*') ? cleaned : `*${cleaned}*`);
     if (options.category !== undefined) params.set('search[category]', String(options.category));
     params.set('search[hide_empty]', 'false');
     const limit = Math.min(1000, Math.max(1, Math.floor(options.limit ?? 1000)));
@@ -303,16 +316,31 @@ class DanbooruService {
     params.set('page', String(page));
     // Danbooru's tag listing orders are nested under search[order], not a top-level order parameter.
     params.set('search[order]', options.order ?? 'count');
+    const cacheKey = `${cleaned}\u001f${options.category ?? ''}\u001f${options.order ?? 'count'}\u001f${limit}\u001f${page}`;
+    const cached = this.remoteTagPageCache.get(cacheKey);
+    if (cached) return cached;
+
     const result = await fetchDanbooruJsonWithMeta<any[]>(`/tags.json?${params.toString()}`, options.signal);
     const tags = Array.isArray(result.data) ? result.data.map(mapRemoteTag).filter((tag) => Boolean(tag.name)) : [];
     const totalCount = result.totalCount;
-    return { tags, totalCount, page, limit, hasMore: totalCount != null ? page * limit < totalCount : tags.length >= limit };
+    const response = { tags, totalCount, page, limit, hasMore: totalCount != null ? page * limit < totalCount : tags.length >= limit };
+    this.remoteTagPageCache.set(cacheKey, response);
+    return response;
   }
 
   public async searchRemoteTags(query = '', options: { category?: number; order?: 'count' | 'name' | 'date'; limit?: number; page?: number; signal?: AbortSignal } = {}): Promise<RemoteTag[]> {
     const result = await this.searchRemoteTagsPage(query, options);
     return result.tags;
   }
+
+  /** Fast autocomplete using the same session cache as the remote tag browser. */
+  public async searchRemoteTagAutocomplete(query: string, limit = 12, signal?: AbortSignal): Promise<RemoteTag[]> {
+    const cleaned = query.trim();
+    if (cleaned.length < 2) return [];
+    const result = await this.searchRemoteTagsPage(cleaned, { limit: Math.min(50, Math.max(1, limit)), page: 1, order: 'count', signal });
+    return result.tags;
+  }
+
 
   public async getRemotePosts(
     tag: string | null,

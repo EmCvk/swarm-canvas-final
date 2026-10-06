@@ -34,7 +34,7 @@ export const BUILDER_TAXONOMIES: BuilderTaxonomyDefinition[] = [
   {
     id: 'danbooru_groups',
     label: 'Danbooru Wiki Groups',
-    description: 'The bundled Danbooru wiki-category groups. This view deliberately mirrors source categorization rather than semantic reinterpretation.',
+    description: 'Danbooru wiki groups plus semantic routing for native General tags, so the builder never leaves a large uncategorized General bucket.',
   },
 ];
 
@@ -373,6 +373,7 @@ function posePlacement(tag: string, wikiCategory: string | null | undefined): Bu
 
 function bodyPlacement(tag: string, wikiCategory: string | null | undefined): BuilderPlacement | null {
   const t = cleanKey(tag);
+  if (has(t, ['body', 'anatomy', 'physique', 'torso', 'abdomen', 'waist', 'navel', 'belly', 'stomach'])) return { parent: PATH.body, sub: 'Chest & torso', leaf: 'General body / torso' };
   if (wikiCategory === 'Body Parts') {
     if (has(t, ['chest', 'torso', 'breast', 'breasts', 'cleavage', 'nipple', 'pectorals', 'collarbone', 'abdomen', 'abs', 'stomach', 'belly', 'navel'])) return { parent: PATH.body, sub: 'Chest & torso', leaf: 'Regional anatomy' };
     if (has(t, ['shoulder', 'shoulders', 'armpit', 'clavicle'])) return { parent: PATH.body, sub: 'Chest & torso', leaf: 'Shoulder / upper torso anatomy' };
@@ -410,7 +411,7 @@ function narrowFallback(tag: string, nativeCategory: string | undefined, wikiCat
   if (has(t, ['sword', 'gun', 'knife', 'book', 'phone', 'guitar', 'flower', 'food', 'cup', 'umbrella', 'vehicle', 'car'])) return { parent: PATH.objects, sub: 'Objects & props', leaf: 'Type' };
   if (has(t, ['masterpiece', 'best_quality', 'high_quality', 'cinematic', 'anime_coloring', 'cel_shading', 'watercolor', 'oil_painting', 'lineart', 'sketch', 'cyberpunk', 'fantasy'])) return { parent: PATH.style, sub: 'Visual style', leaf: 'Aesthetic / rendering' };
   if (has(t, ['girl', 'boy', 'woman', 'man', 'solo', 'couple', 'character', 'elf', 'angel', 'demon'])) return { parent: PATH.subject, sub: 'People & characters', leaf: 'Subject / count / identity' };
-  return { parent: 'General', sub: 'Unclassified', leaf: 'Needs taxonomy review' };
+  return { parent: PATH.concepts, sub: 'General concepts', leaf: 'Other / low-frequency concept' };
 }
 
 function contextSpecificPlacement(tag: string): BuilderPlacement | null {
@@ -481,7 +482,7 @@ function semanticPlacement(tag: string, nativeCategory: string | undefined, _nat
       else if (nativeCategory === 'Character') push({ parent: PATH.subject, sub: 'Characters', leaf: 'Identity' });
       else if (nativeCategory === 'Copyright') push({ parent: PATH.subject, sub: 'Series & franchises', leaf: 'Identity' });
       else if (nativeCategory === 'Meta') push({ parent: PATH.technical, sub: 'Metadata', leaf: wikiCategory });
-      else push({ parent: 'General', sub: 'Unclassified', leaf: `Wiki: ${wikiCategory}` });
+      else push(narrowFallback(tag, nativeCategory, wikiCategory));
     }
   }
 
@@ -549,7 +550,6 @@ export function getPromptRolePlacements(record: Pick<TagRecord, 'tag' | 'nativeC
     else if (p.parent === PATH.technical) push({ parent: 'Technical', sub: p.sub, leaf: p.leaf });
     else push({ parent: p.parent, sub: p.sub, leaf: p.leaf });
   }
-  if (!out.length) push({ parent: 'General', sub: 'Unclassified', leaf: 'Needs taxonomy review' });
   return out;
 }
 

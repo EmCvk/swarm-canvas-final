@@ -216,6 +216,52 @@ function filterBuilderTags(tags: string[], sfwFilter: 'all' | 'sfw' | 'nsfw'): s
   });
 }
 
+const SEMANTIC_TO_DANBOORU_GROUP: Record<string, string> = {
+  Subject: 'Society & Culture',
+  Appearance: 'Face & Hair',
+  Body: 'Body & Anatomy',
+  Clothing: 'Attire & Clothing',
+  Actions: 'Poses & Actions',
+  Pose: 'Poses & Actions',
+  Interaction: 'Poses & Actions',
+  Composition: 'Composition & Style',
+  Camera: 'Composition & Style',
+  Environment: 'Locations & Scenery',
+  Scene: 'Locations & Scenery',
+  Objects: 'Society & Culture',
+  Style: 'Composition & Style',
+  'Concepts & Lore': 'Text & Lore',
+  Technical: 'Quality & Meta',
+  'NSFW & Adult': 'Sex & Erotica',
+};
+
+function getDanbooruGroupPlacements(record: RichTagRecord) {
+  // Keep recognized Danbooru wiki groups intact. Only the otherwise-empty
+  // Native Categories → General bucket is semantically routed.
+  if (record.wikiCategory) {
+    const parent = WIKI_PARENT_MAP.get(record.wikiCategory);
+    if (parent) return [{ parent, sub: record.wikiCategory, leaf: undefined }];
+  }
+
+  if (record.nativeCategory === 'General') {
+    const placements = getSemanticPlacements(record);
+    const mapped = placements
+      .map((placement) => ({
+        parent: SEMANTIC_TO_DANBOORU_GROUP[placement.parent] || 'Society & Culture',
+        sub: placement.sub || 'General',
+        leaf: placement.leaf,
+      }))
+      .filter((placement, index, all) => all.findIndex((p) => `${p.parent}\u001f${p.sub}\u001f${p.leaf || ''}` === `${placement.parent}\u001f${placement.sub}\u001f${placement.leaf || ''}`) === index);
+    if (mapped.length) return mapped;
+  }
+
+  return [{
+    parent: 'Native Categories',
+    sub: record.nativeCategory || 'General',
+    leaf: undefined,
+  }];
+}
+
 function getBuilderPlacements(record: RichTagRecord, taxonomy: BuilderTaxonomyId) {
   if (taxonomy === 'semantic') return getSemanticPlacements(record);
   if (taxonomy === 'prompt_flow') return getPromptFlowPlacements(record);
@@ -226,16 +272,7 @@ function getBuilderPlacements(record: RichTagRecord, taxonomy: BuilderTaxonomyId
     return [{ parent, sub, leaf: undefined }];
   }
 
-  if (record.wikiCategory) {
-    const parent = WIKI_PARENT_MAP.get(record.wikiCategory);
-    if (parent) return [{ parent, sub: record.wikiCategory, leaf: undefined }];
-  }
-
-  return [{
-    parent: 'Native Categories',
-    sub: record.nativeCategory || 'General',
-    leaf: undefined,
-  }];
+  return getDanbooruGroupPlacements(record);
 }
 
 function getBuilderIndex(taxonomy: BuilderTaxonomyId): Map<string, string[]> {
@@ -557,6 +594,56 @@ self.onmessage = async (e: MessageEvent) => {
         };
       });
       self.postMessage({ id, success: true, data: { tags, total, page, limit, hasMore: start + pageTags.length < total } });
+      return;
+    }
+
+    if (type === 'SEARCH_BUILDER_AUTOCOMPLETE') {
+      const taxonomy = (payload.taxonomy || 'prompt_flow') as BuilderTaxonomyId;
+      const sfwFilter = (payload.sfwFilter || 'all') as 'all' | 'sfw' | 'nsfw';
+      const parent = String(payload.parent || 'All');
+      const sub = String(payload.sub || '');
+      const leaf = String(payload.leaf || '');
+      const q = cleanKey(payload.query || '');
+      const limit = Math.min(24, Math.max(1, Number(payload.limit || 12)));
+      if (!q) { self.postMessage({ id, success: true, data: [] }); return; }
+
+      const index = getBuilderIndex(taxonomy);
+      const candidates = new Set<string>();
+      for (const [key, tags] of index.entries()) {
+        const [entryParent, entrySub, entryLeaf] = key.split('\u001f');
+        if (parent !== 'All' && entryParent !== parent) continue;
+        if (sub && sub !== 'All' && entrySub !== sub) continue;
+        if (leaf && entryLeaf !== leaf) continue;
+        tags.forEach((tag) => candidates.add(tag));
+      }
+
+      const matches = [...candidates]
+        .filter((tag) => {
+          const record = lookup.get(cleanKey(tag));
+          if (!record) return false;
+          if (sfwFilter === 'sfw' && record.isNsfw) return false;
+          if (sfwFilter === 'nsfw' && !record.isNsfw) return false;
+          return record.normalizedTag.includes(q) || cleanKey(record.tag).includes(q);
+        })
+        .sort((a, b) => (lookup.get(cleanKey(b))?.postCount ?? -1) - (lookup.get(cleanKey(a))?.postCount ?? -1) || a.localeCompare(b))
+        .slice(0, limit)
+        .map((tag) => {
+          const record = lookup.get(cleanKey(tag))!;
+          return {
+            tag: record.tag,
+            postCount: record.postCount,
+            description: record.description,
+            nativeCategory: record.nativeCategory,
+            wikiCategory: record.wikiCategory,
+            uiCategory: record.uiCategory,
+            uiSubCategory: record.uiSubCategory,
+            uiSubSubCategory: record.uiSubSubCategory,
+            classificationConfidence: record.classificationConfidence,
+            classificationSources: record.classificationSources,
+            isNsfw: record.isNsfw,
+          };
+        });
+      self.postMessage({ id, success: true, data: matches });
       return;
     }
 

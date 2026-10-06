@@ -175,13 +175,6 @@ const openAnimaPromptBuilderPopup = async () => {
   }
   const label = 'anima-prompt-builder';
   try {
-    const current = useAppStore.getState();
-    window.localStorage.setItem('swarm_anima_builder_sync_v1', JSON.stringify({
-      positive: current.prompt,
-      negative: current.negativePrompt,
-      updatedAt: Date.now(),
-    }));
-
     const existing = await WebviewWindow.getByLabel(label);
     if (existing) {
       await existing.show().catch(() => undefined);
@@ -273,18 +266,6 @@ const getGenerationViewerPanels = (api: DockviewApi | null): any[] => {
     console.warn('[Workspace] Could not enumerate Dockview panels:', error);
     return [];
   }
-};
-
-const findGenerationViewerPanel = (api: DockviewApi | null): any | null => {
-  const panels = getGenerationViewerPanels(api);
-  if (panels.length === 0) return null;
-  if (panels.length === 1) return panels[0];
-
-  // A viewer created by an older build may have an id such as
-  // `generationviewer_<timestamp>`. Prefer that over the canonical panel when
-  // cleaning up a duplicate pair, because it is the one the user may already
-  // have positioned manually.
-  return panels.find((panel: any) => panel?.id !== 'generationviewer_panel') || panels[0];
 };
 
 const consolidateGenerationViewerPanels = (api: DockviewApi | null): any | null => {
@@ -913,14 +894,10 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   // A scrubbed frame (from the preview-history strip) takes priority over the live frame.
 
   const displayImage = scrubFrameIndex !== null && previewHistory[scrubFrameIndex]
-
     ? previewHistory[scrubFrameIndex]
-
     : isGenerating
-
-    ? (viewportMode === 'static' ? activeImage : (livePreview || activeImage))
-
-    : (activeImage || livePreview);
+      ? (viewportMode === 'static' ? (activeImage || livePreview) : (livePreview || activeImage))
+      : (activeImage || livePreview);
 
 
 
@@ -1394,6 +1371,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
               src={resolveImageUrl(displayImage)}
 
               onError={handleImageError}
+              onLoad={(e) => { e.currentTarget.dataset.previewFallbackIndex = '0'; }}
 
               alt="Viewport Output"
 
@@ -2628,24 +2606,6 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-  // Keep the standalone Anima Prompt Builder window synchronized with the main prompt editor.
-  useEffect(() => {
-    const onStorage = (event: StorageEvent) => {
-      if (event.key !== 'swarm_anima_builder_sync_v1' || !event.newValue) return;
-      try {
-        const payload = JSON.parse(event.newValue) as { positive?: string; negative?: string };
-        if (typeof payload.positive === 'string' && payload.positive !== useAppStore.getState().prompt) {
-          setPrompt(payload.positive);
-        }
-        if (typeof payload.negative === 'string' && payload.negative !== useAppStore.getState().negativePrompt) {
-          setNegativePrompt(payload.negative);
-        }
-      } catch {}
-    };
-    window.addEventListener('storage', onStorage);
-    return () => window.removeEventListener('storage', onStorage);
-  }, [setPrompt, setNegativePrompt]);
-
   // Recovery snapshot protects the editor from a transient store/layout remount.
   useEffect(() => {
     if (settings.preservePromptsOnReload === false) return;
@@ -3394,7 +3354,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     const result: string[] = [];
 
-    const lines = text.split('\n');
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
 
 
 
@@ -3438,7 +3398,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     const result: string[] = [];
 
-    const lines = text.split('\n');
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
 
 
 
@@ -4859,8 +4819,28 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     return firstVisible.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim().slice(0, 54);
   };
 
+  const isPromptSectionDisabled = (sectionText: string): boolean => {
+    const trimmed = sectionText.trim();
+    return trimmed.startsWith('/*') && trimmed.endsWith('*/');
+  };
+
+  const togglePromptSectionDisabled = (target: 'positive' | 'negative', index: number) => {
+    updatePromptSections(target, (sections) => {
+      const current = sections[index] ?? '';
+      const trimmed = current.trim();
+      if (!trimmed) return sections;
+      if (trimmed.startsWith('/*') && trimmed.endsWith('*/')) {
+        sections[index] = trimmed.slice(2, -2).trim();
+      } else {
+        sections[index] = `/* ${trimmed} */`;
+      }
+      return sections;
+    });
+  };
+
   const getPromptSectionStats = (sectionText: string) => {
-    const tokens = sectionText.split('\n').flatMap(splitPromptTokens).filter(Boolean);
+    const normalized = isPromptSectionDisabled(sectionText) ? sectionText.trim().slice(2, -2).trim() : sectionText;
+    const tokens = normalized.split('\n').flatMap(splitPromptTokens).filter(Boolean);
     const loraCount = tokens.filter((token) => {
       const clean = token.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
       return isLoraToken(clean);
@@ -5212,11 +5192,13 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     return (
       <div
         className={`flex items-center gap-1.5 rounded-lg px-1.5 py-1 border transition-colors ${
-          focus
-            ? accent === 'indigo'
-              ? 'border-indigo-500/40 bg-indigo-500/8'
-              : 'border-rose-500/40 bg-rose-500/8'
-            : 'border-white/5 bg-white/[0.018]'
+          isPromptSectionDisabled(sectionText)
+            ? 'border-zinc-700/50 bg-zinc-900/45 opacity-75'
+            : focus
+              ? accent === 'indigo'
+                ? 'border-indigo-500/40 bg-indigo-500/8'
+                : 'border-rose-500/40 bg-rose-500/8'
+              : 'border-white/5 bg-white/[0.018]'
         }`}
       >
         <button
@@ -5262,6 +5244,14 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </button>
           <button type="button" onClick={(e) => { e.stopPropagation(); savePromptSectionPreset(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-amber-200 hover:bg-amber-500/10 cursor-pointer" title="Save section as reusable preset">
             <Bookmark className="w-3 h-3" />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); togglePromptSectionDisabled(target, lineIndex); }}
+            className={`p-0.5 rounded cursor-pointer ${isPromptSectionDisabled(sectionText) ? 'text-amber-300 bg-amber-500/10' : 'text-zinc-500 hover:text-amber-200 hover:bg-amber-500/10'}`}
+            title={isPromptSectionDisabled(sectionText) ? 'Enable section for generation' : 'Disable section without deleting it'}
+          >
+            {isPromptSectionDisabled(sectionText) ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
           </button>
           <button type="button" onClick={(e) => { e.stopPropagation(); duplicatePromptSection(target, lineIndex); }} className="p-0.5 rounded text-zinc-500 hover:text-emerald-200 hover:bg-emerald-500/10 cursor-pointer" title="Duplicate section">
             <Plus className="w-3 h-3" />
