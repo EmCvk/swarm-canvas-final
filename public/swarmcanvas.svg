@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#222833"/><stop offset="1" stop-color="#0c0e12"/></linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.18" r="0.75"><stop offset="0" stop-color="#ffffff" stop-opacity=".16"/><stop offset=".6" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+    <linearGradient id="honey" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffd978"/><stop offset="1" stop-color="#f09a22"/></linearGradient>
+    <linearGradient id="honeyDim" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f2b94b" stop-opacity=".62"/><stop offset="1" stop-color="#d9831c" stop-opacity=".62"/></linearGradient>
+    <linearGradient id="image" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3fe3c6"/><stop offset="1" stop-color="#3d8bff"/></linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="228" fill="url(#tile)"/>
+  <rect x="32" y="32" width="960" height="960" rx="228" fill="url(#glow)"/>
+  <rect x="35" y="35" width="954" height="954" rx="225" fill="none" stroke="#ffffff" stroke-opacity=".09" stroke-width="6"/>
+  <g stroke-linejoin="round" stroke-width="46">
+    <path d="M331.9,204.0 L479.1,289.0 L479.1,459.0 L331.9,544.0 L184.6,459.0 L184.6,289.0 Z" fill="url(#honey)" stroke="url(#honey)"/>
+    <path d="M692.1,204.0 L839.4,289.0 L839.4,459.0 L692.1,544.0 L544.9,459.0 L544.9,289.0 Z" fill="url(#image)" stroke="url(#image)"/>
+    <path d="M512.0,516.0 L659.2,601.0 L659.2,771.0 L512.0,856.0 L364.8,771.0 L364.8,601.0 Z" fill="rgba(255,255,255,.05)" stroke="rgba(255,255,255,.66)" stroke-width="30"/>
+  </g>
+</svg>

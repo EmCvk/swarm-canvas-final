@@ -2398,8 +2398,10 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   outline-offset: 2px;
 }
 .sc-prompt-pill-edit-input {
-  min-width: 8ch;
-  max-width: min(54ch, 60vw);
+  min-width: 0;
+  max-width: none !important;
+  flex: 0 0 auto;
+  white-space: pre;
   color: var(--sc-text) !important;
   caret-color: var(--sc-gold) !important;
   user-select: text !important;
@@ -2423,6 +2425,10 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
   transform: translateY(0);
 }
 .sc-prompt-pill--editing {
+  width: max-content !important;
+  max-width: none !important;
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
   cursor: text !important;
   transform: none !important;
   border-color: color-mix(in srgb, var(--sc-gold) 70%, var(--sc-border)) !important;
@@ -2502,3 +2508,10 @@ body [class~="text-3xl"] { font-size: calc(1.875rem * var(--sc-font-scale, 1)) !
 .sc-icon-button:hover { background: var(--sc-surface-3); color: var(--sc-text); border-color: var(--sc-theme-border) !important; transform: translateY(-1px); }
 @keyframes sc-pop-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @media (prefers-reduced-motion: reduce) { .sc-prompt-builder-trigger, .sc-builder-action, .sc-icon-button { transition: none !important; } }
+
+/* Prompt pill drag: render a stable drop target while a drag is active; do not animate pills as they reorder. */
+.sc-prompt-pill--drop-target {
+  outline: 2px solid color-mix(in srgb, var(--sc-gold-strong, #e4bd76) 78%, transparent);
+  outline-offset: 2px;
+}
+.sc-prompt-pill { transition: color .08s ease, background-color .08s ease, border-color .08s ease; }

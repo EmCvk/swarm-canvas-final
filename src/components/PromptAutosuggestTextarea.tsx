@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { danbooru } from '../api/danbooruService';
+import { PromptAutocompleteTextarea } from './PromptAutocompleteTextarea';
 import { parseWeightedToken, formatWeightedToken, isLoraToken, loraDisplayName, splitPromptTokens } from '../utils/promptWeights';
 import {
   X,
@@ -440,11 +441,13 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
       )}
 
       {isRawMode ? (
-        <textarea
+        <PromptAutocompleteTextarea
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
           placeholder={placeholder}
-          className="w-full flex-1 p-2 bg-transparent text-gray-200 text-xs font-mono outline-none resize-none"
+          rows={6}
+          aria-label={`${target} prompt text editor`}
+          className="w-full min-h-24 flex-1 p-2 bg-transparent text-gray-200 text-xs font-mono outline-none resize-none"
         />
       ) : (
         <div
@@ -492,7 +495,8 @@ export const PromptAutosuggestTextarea: React.FC<PromptAutosuggestTextareaProps>
                     }
                   }}
                   onBlur={() => finishEditPill(index)}
-                  className="sc-prompt-pill-edit-input px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none w-28 font-mono select-text"
+                  style={{ width: `${Math.max(96, Math.min(720, editingText.length * 7.2 + 24))}px` }}
+                  className="sc-prompt-pill-edit-input shrink-0 px-2 py-0.5 text-xs bg-[#1e2232] text-white rounded border border-indigo-500 outline-none font-mono select-text"
                 />
               );
             }

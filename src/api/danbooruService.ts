@@ -22,7 +22,7 @@ export interface TagDetail {
 
 export interface AutocompleteItem { name: string; category?: string; count?: number | null }
 interface Stats { parentCategories: string[]; parentCounts: Record<string, number>; subCounts: Record<string, Record<string, number>>; totalTags: number }
-interface Pending { resolve: (value:any)=>void; reject: (reason:any)=>void }
+interface Pending { resolve: (value:any)=>void; reject: (reason:any)=>void; timer?: ReturnType<typeof setTimeout> }
 
 export type RemoteTagCategory = 'general' | 'artist' | 'copyright' | 'character' | 'meta' | 'unknown';
 export type RemoteTagCategoryCounts = Partial<Record<Exclude<RemoteTagCategory, 'unknown'>, number | null>>;
@@ -200,7 +200,10 @@ class DanbooruService {
   // Session cache: survives category/search changes and is discarded naturally when Swarm Canvas closes.
   private remoteTagPageCache = new Map<string, RemoteTagPage>();
   private loaded = false;
+  private initError: string | null = null;
+  private initPromise: Promise<void> = Promise.resolve();
   private callbacks = new Set<() => void>();
+  private settledCallbacks = new Set<() => void>();
   private stats: Stats = { parentCategories: [], parentCounts: {}, subCounts: {}, totalTags: 0 };
 
   constructor() {
@@ -208,17 +211,71 @@ class DanbooruService {
     this.worker.onmessage = (event: MessageEvent) => {
       const { id, success, data, error } = event.data;
       const pending = this.pending.get(id); if (!pending) return;
-      this.pending.delete(id); if (success) pending.resolve(data); else pending.reject(new Error(error || 'Tag worker request failed'));
+      this.pending.delete(id);
+      if (pending.timer) clearTimeout(pending.timer);
+      if (success) pending.resolve(data); else pending.reject(new Error(error || 'Tag worker request failed'));
     };
-    this.worker.onerror = event => console.error('[Danbooru] worker error', event);
-    void this.init();
+    this.worker.onerror = event => {
+      const message = event.message || 'Local tag database worker failed.';
+      console.error('[Danbooru] worker error', event);
+      this.initError = message;
+      this.loaded = false;
+      for (const [id, pending] of this.pending) {
+        if (pending.timer) clearTimeout(pending.timer);
+        pending.reject(new Error(message));
+        this.pending.delete(id);
+      }
+      this.callbacks.clear();
+      for (const cb of this.settledCallbacks) cb();
+      this.settledCallbacks.clear();
+    };
+    this.initPromise = this.init();
   }
-  private request<T>(type: string, payload: Record<string,any> = {}): Promise<T> {
-    return new Promise<T>((resolve,reject) => { const id=this.nextId++; this.pending.set(id,{resolve,reject}); this.worker.postMessage({id,type,payload}); });
+  private async request<T>(type: string, payload: Record<string,any> = {}): Promise<T> {
+    // Do not let callers query the worker while INIT is still fetching/indexing its assets.
+    // The worker's async INIT handler yields while fetching, so an early query could otherwise
+    // run against empty records and leave the UI appearing permanently uninitialized.
+    if (type !== 'INIT') {
+      await this.initPromise;
+      if (!this.loaded) throw new Error(this.initError || 'The local tag database did not initialize.');
+    }
+    return new Promise<T>((resolve,reject) => {
+      const id = this.nextId++;
+      // Full taxonomy indexes can take longer on midrange CPUs. The worker now yields
+      // between chunks; All-tags page requests remain short, while category-dependent
+      // requests get a generous bounded window instead of failing at 30 seconds.
+      const isBuilderIndexRequest = type === 'GET_BUILDER_GROUPS' || type === 'SEARCH_BUILDER_AUTOCOMPLETE' || (type === 'GET_BUILDER_TAGS' && payload.parent !== 'All' && Boolean(payload.parent));
+      const timeoutMs = type === 'INIT' ? 90000 : (isBuilderIndexRequest ? 180000 : 20000);
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        pending.reject(new Error(`${type} timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+      }, timeoutMs);
+      this.pending.set(id,{resolve,reject,timer});
+      this.worker.postMessage({id,type,payload});
+    });
   }
-  private async init() { try { this.stats=await this.request<Stats>('INIT'); this.loaded=true; for(const cb of this.callbacks)cb(); this.callbacks.clear(); } catch(error){ console.error('[Danbooru] failed to load local tag database',error); } }
+  private async init() {
+    try {
+      this.stats = await this.request<Stats>('INIT');
+      this.loaded = true;
+      this.initError = null;
+      for (const cb of this.callbacks) cb();
+      this.callbacks.clear();
+    } catch (error) {
+      this.initError = error instanceof Error ? error.message : String(error);
+      console.error('[Danbooru] failed to load local tag database', error);
+      this.callbacks.clear();
+    } finally {
+      for (const cb of this.settledCallbacks) cb();
+      this.settledCallbacks.clear();
+    }
+  }
   public isReady(){return this.loaded}
+  public getInitError(){return this.initError}
   public onLoaded(cb:()=>void){if(this.loaded)cb();else this.callbacks.add(cb);return()=>this.callbacks.delete(cb)}
+  public onSettled(cb:()=>void){if(this.loaded || this.initError){cb();return()=>{};} this.settledCallbacks.add(cb); return()=>this.settledCallbacks.delete(cb)}
   public getParentCategories(){return this.stats.parentCategories}
   public getSubCategories(parent:string){return ['All',...Object.keys(this.stats.subCounts[parent]||{}).filter(s=>s!=='All')]}
   public getParentCount(parent:string){return this.stats.parentCounts[parent]??0}
@@ -440,7 +497,9 @@ class DanbooruService {
   }
 
   public getRemoteTagUrl(tag: string): string {
-    return `${DANBOORU_ORIGIN}/tags/${encodeURIComponent(encodeTagQuery(tag))}`;
+    // Open the posts filtered by this tag, rather than the tag's metadata page.
+    const query = encodeURIComponent(encodeTagQuery(tag));
+    return `${DANBOORU_ORIGIN}/posts?tags=${query}`;
   }
 
   public getRemotePostUrl(id: number): string {

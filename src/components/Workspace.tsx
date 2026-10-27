@@ -17,6 +17,7 @@ import { TagRarityInspector } from './companions/TagRarityInspector';
 
 
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { useEffect, useState, useRef, useMemo, useCallback, useDeferredValue } from 'react';
 
 import { useShallow } from 'zustand/react/shallow';
@@ -52,10 +53,15 @@ import {
 import { danbooru, TagDetail } from '../api/danbooruService';
 
 import { PromptAutosuggestTextarea } from './PromptAutosuggestTextarea';
+import { SimplifiedPromptPillEditor } from './SimplifiedPromptPillEditor';
 
 import { CustomContextMenu, ContextMenuItem } from './CustomContextMenu';
 
 import { ModelPlaceholder } from './ModelPlaceholder';
+import { BrandMark, BrandLockup } from './BrandMark';
+import { HiveStudio } from './HiveStudio';
+import { TowerStudio } from './TowerStudio';
+import { GenkoStudio } from './GenkoStudio';
 
 import { DebugConsole } from './DebugConsole';
 
@@ -87,7 +93,7 @@ import {
 
   RotateCw, Search, Layers, Sparkle, LayoutGrid, RefreshCw,
 
-  Box, ZoomIn, ZoomOut, Maximize2, Minimize2,
+  Box, ZoomIn, ZoomOut, Maximize2, Minimize2, Expand,
 
   History as HistoryIcon, Image as ImageIcon,
 
@@ -670,15 +676,23 @@ const getCachedPreview = async (src: string): Promise<string> => {
 
 
 
-const ModelPreview = React.memo(({ url, urls = [], name, type = 'model', className = '' }: {
+/** Civitai serves any width from the same URL, so a bigger rendition is just a different path segment. */
+const withPreviewWidth = (url: string, width: number): string => {
+  if (!/^https?:\/\/image\.civitai\.com\//i.test(url)) return url;
+  return /\/width=\d+\//i.test(url) ? url.replace(/\/width=\d+\//i, `/width=${width}/`) : url;
+};
+
+const ModelPreview = React.memo(({ url, urls = [], name, type = 'model', className = '', hiRes = false }: {
   url?: string;
   urls?: string[];
   name: string;
   type?: string;
   className?: string;
+  /** Request a larger rendition from Civitai (for big cards). */
+  hiRes?: boolean;
 }) => {
 
-  const candidates = useMemo(() => Array.from(new Set([url, ...urls].filter(Boolean).map((v) => getPreviewSource(v)))), [url, urls]);
+  const candidates = useMemo(() => Array.from(new Set([url, ...urls].filter((v): v is string => Boolean(v) && !/\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(String(v))).map((v) => hiRes ? withPreviewWidth(getPreviewSource(v), 1024) : getPreviewSource(v)))), [url, urls, hiRes]);
 
   const [index, setIndex] = useState(0);
 
@@ -1820,17 +1834,14 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-        <InfoPopover content="Adds the current prompt and parameters to the end of the queue and starts processing if nothing is running. It does not re-enqueue an interrupted active job; jobs that were already waiting remain in their original order." side="left" className="sc-popover-button-trigger">
-          <button
-            type="button"
-            onClick={() => void enqueueAndProcess()}
-            className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
-            title="Add current prompt to background queue and start processing"
-          >
-            <Plus className="w-3.5 h-3.5 text-blue-300" />
-            <span>Queue</span>
-          </button>
-        </InfoPopover>
+        <button
+          type="button"
+          onClick={() => void enqueueAndProcess()}
+          className="sc-action-button sc-action-neutral px-3.5 py-2 rounded-xl font-mono text-[11px]"
+        >
+          <Plus className="w-3.5 h-3.5 text-blue-300" />
+          <span>Queue</span>
+        </button>
 
       </div>
 
@@ -1908,20 +1919,17 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
               {queuedCount > 0 && !isGenerating && (
                 <>
-                <InfoPopover content="Starts the jobs already in the queue without adding another copy of the current prompt." side="bottom" className="sc-popover-button-trigger">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (store.isQueuePaused) store.setIsQueuePaused?.(false);
-                      void startQueueProcessing();
-                    }}
-                    className="sc-action-button sc-action-primary px-2 py-0.5 font-mono text-[10px]"
-                    title="Start processing queued jobs without adding the current prompt"
-                  >
-                    <Play className="w-2.5 h-2.5" />
-                    <span>Run Queue</span>
-                  </button>
-                </InfoPopover>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (store.isQueuePaused) store.setIsQueuePaused?.(false);
+                    void startQueueProcessing();
+                  }}
+                  className="sc-action-button sc-action-primary px-2 py-0.5 font-mono text-[10px]"
+                >
+                  <Play className="w-2.5 h-2.5" />
+                  <span>Run Queue</span>
+                </button>
                 </>
               )}
 
@@ -2670,6 +2678,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     negative: null,
   });
   const [collapsedPromptSections, setCollapsedPromptSections] = useLocalState<Record<'positive' | 'negative', number[]>>('swarm_prompt_collapsed_sections_v2', { positive: [], negative: [] });
+  const [hideCollapsedPromptSections, setHideCollapsedPromptSections] = useLocalState<boolean>('swarm_prompt_hide_collapsed_sections_v1', false);
 
 
 
@@ -2982,7 +2991,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   // 3-way layout switch: 'split' = default (both), 'tags_only' = only tags, 'prompts_only' = only prompts
 
-  const [panelLayoutMode, setPanelLayoutMode] = useLocalState<'split' | 'tags_only' | 'prompts_only'>('swarm_prompt_layout_mode_v3', 'split');
+  const [panelLayoutMode, setPanelLayoutMode] = useLocalState<'split' | 'tags_only' | 'prompts_only'>('swarm_prompt_layout_mode_v5', 'split');
 
 
 
@@ -3020,7 +3029,9 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   // between events. Reading a stale `tokens`/`draggedPill` snapshot across those rapid-fire
   // events was corrupting the prompt (splicing against an array that no longer matched
   // reality) - a ref is always current, with no render-cycle lag.
-  const draggedPillRef = useRef<{ target: 'positive' | 'negative'; index: number } | null>(null);
+  const draggedPillRef = useRef<{ target: 'positive' | 'negative'; fromIndex: number; targetIndex: number; originalTokens: string[] } | null>(null);
+  const pillDragActiveRef = useRef(false);
+  const [dragOverPill, setDragOverPill] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
 
   const [newTagInput, setNewTagInput] = useState<{ positive: string; negative: string }>({ positive: '', negative: '' });
 
@@ -3101,7 +3112,50 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const [activeInsertion, setActiveInsertion] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
 
   const [insertTagInput, setInsertTagInput] = useState('');
+  const [insertTagSuggestions, setInsertTagSuggestions] = useState<string[]>([]);
+  const [insertTagSuggestionIndex, setInsertTagSuggestionIndex] = useState(0);
+  const [insertTagSuggestionPosition, setInsertTagSuggestionPosition] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
+  const insertTagInputRef = useRef<HTMLInputElement | null>(null);
+  const insertTagSuggestionRequestRef = useRef(0);
+  useEffect(() => {
+    const query = insertTagInput.trim().replace(/[_-]+/g, ' ');
+    const requestId = ++insertTagSuggestionRequestRef.current;
+    if (!activeInsertion || query.length < 2) { setInsertTagSuggestions([]); setInsertTagSuggestionIndex(0); return; }
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const found = await danbooru.getTags('All', 'All', query, 8);
+        if (!active || requestId !== insertTagSuggestionRequestRef.current) return;
+        setInsertTagSuggestions([...new Set((found || []).filter(Boolean))].slice(0, 8));
+        setInsertTagSuggestionIndex(0);
+      } catch { if (active && requestId === insertTagSuggestionRequestRef.current) setInsertTagSuggestions([]); }
+    }, 150);
+    return () => { active = false; clearTimeout(timer); };
+  }, [activeInsertion, insertTagInput]);
 
+  useEffect(() => {
+    if (!activeInsertion || insertTagSuggestions.length === 0) { setInsertTagSuggestionPosition(null); return; }
+    const updatePosition = () => {
+      const rect = insertTagInputRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const viewportWidth = Math.max(1, window.innerWidth);
+      const width = Math.max(220, Math.min(320, viewportWidth - 16));
+      const below = window.innerHeight - rect.bottom - 8;
+      const above = rect.top - 8;
+      const openAbove = below < 150 && above > below;
+      const maxHeight = Math.max(80, Math.min(220, openAbove ? above : below));
+      setInsertTagSuggestionPosition({
+        left: Math.max(8, Math.min(rect.left, viewportWidth - width - 8)),
+        top: openAbove ? Math.max(8, rect.top - maxHeight - 4) : Math.min(window.innerHeight - maxHeight - 8, rect.bottom + 4),
+        width,
+        maxHeight,
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => { window.removeEventListener('resize', updatePosition); window.removeEventListener('scroll', updatePosition, true); };
+  }, [activeInsertion, insertTagSuggestions.length]);
 
 
   const pillClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3610,7 +3664,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 toggleTokenMutedAt(target, index);
               }}
               className="p-0.5 rounded opacity-60 hover:opacity-100 hover:text-white transition-opacity"
-              title={muted ? 'Enable LoRA' : 'Mute LoRA'}
+              title={muted ? 'Enable LoRA' : 'Disable LoRA'}
             >
               {muted ? <EyeOff className="w-2.5 h-2.5" /> : <Eye className="w-2.5 h-2.5" />}
             </button>
@@ -4045,305 +4099,110 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
   const handlePromptboxPillContextMenu = (target: 'positive' | 'negative', index: number, tokenText: string, e: React.MouseEvent) => {
-
     e.preventDefault();
-
     e.stopPropagation();
 
-
-
     const tokens = [...getPromptTokens(target)];
-
     const isMulti = selectedTokens[target].has(index) && selectedTokens[target].size > 1;
 
-
-
     if (isMulti) {
-
       const indices = Array.from(selectedTokens[target]).sort((a, b) => a - b);
-
-      const stepIncrement = settings.tagClickWeightStep ?? 0.2;
-
-
-
+      const allDisabled = indices.every((i) => tokens[i]?.startsWith('/*') && tokens[i]?.endsWith('*/'));
       setActiveContextMenu({
-
         x: e.clientX,
-
         y: e.clientY,
-
         title: `Selection (${indices.length} tags)`,
-
         items: [
-
           {
-            label: `Increase Weight All (+${stepIncrement.toFixed(2)})`,
-            icon: <ChevronUp className="w-3.5 h-3.5 text-cyan-400" />,
-            action: () => adjustSelectedPromptWeights(target, stepIncrement),
+            label: allDisabled ? 'Enable Selected' : 'Disable Selected',
+            icon: <Check className="w-3.5 h-3.5 text-emerald-400" />,
+            action: () => toggleSelectedPromptMuted(target),
           },
-
           {
-            label: `Decrease Weight All (-${stepIncrement.toFixed(2)})`,
-            icon: <ChevronDown className="w-3.5 h-3.5 text-amber-400" />,
-            action: () => adjustSelectedPromptWeights(target, -stepIncrement),
+            label: 'Copy Selected',
+            icon: <Copy className="w-3.5 h-3.5 text-zinc-300" />,
+            action: () => { void copySelectedPromptTokens(target); },
           },
-
           {
-
-            label: target === 'positive' ? 'Send Selected to Negative' : 'Send Selected to Positive',
-
+            label: target === 'positive' ? 'Move Selected to Negative' : 'Move Selected to Positive',
             icon: <SplitSquareVertical className="w-3.5 h-3.5 text-indigo-400" />,
-
-            action: () => {
-
-              const moving = indices.map((i) => tokens[i]).filter((t) => t !== '\n' && t !== 'BREAK');
-
-              const remaining = tokens.filter((_, i) => !selectedTokens[target].has(i));
-
-              setPromptTokens(target, remaining);
-
-              if (target === 'positive') {
-
-                setNegativePrompt(negativePrompt.trim() ? `${negativePrompt.trim()}, ${moving.join(', ')}` : moving.join(', '));
-
-              } else {
-
-                setPrompt(prompt.trim() ? `${prompt.trim()}, ${moving.join(', ')}` : moving.join(', '));
-
-              }
-
-              setSelectedTokens({ ...selectedTokens, [target]: new Set() });
-
-            }
-
+            action: () => moveSelectedPromptTokens(target),
           },
-
           {
-
             separator: true,
-
             label: `Delete Selected (${indices.length})`,
-
             danger: true,
-
             icon: <Trash2 className="w-3.5 h-3.5 text-rose-400" />,
-
             action: () => {
-
-              const remaining = tokens.filter((_, i) => !selectedTokens[target].has(i));
-
-              setPromptTokens(target, remaining);
-
-              setSelectedTokens({ ...selectedTokens, [target]: new Set() });
-
-            }
-
-          }
-
-        ]
-
+              const selected = new Set(indices);
+              setPromptTokens(target, tokens.filter((_, i) => !selected.has(i)));
+              setSelectedTokens((prev) => ({ ...prev, [target]: new Set() }));
+            },
+          },
+        ],
       });
-
       return;
-
     }
-
-
 
     if (tokenText === '\n' || tokenText === 'BREAK') {
-
       setActiveContextMenu({
-
         x: e.clientX,
-
         y: e.clientY,
-
         title: tokenText === '\n' ? 'Line Break' : 'BREAK Section',
-
-        items: [
-
-          {
-
-            label: 'Remove Break',
-
-            icon: <Trash2 className="w-3.5 h-3.5" />,
-
-            danger: true,
-
-            action: () => {
-
-              tokens.splice(index, 1);
-
-              setPromptTokens(target, tokens);
-
-            }
-
-          }
-
-        ]
-
+        items: [{
+          label: 'Remove Break',
+          icon: <Trash2 className="w-3.5 h-3.5" />,
+          danger: true,
+          action: () => { tokens.splice(index, 1); setPromptTokens(target, tokens); },
+        }],
       });
-
       return;
-
     }
 
-
-
-    const isMuted = tokenText.startsWith('/*') && tokenText.endsWith('*/');
-
+    const isDisabled = tokenText.startsWith('/*') && tokenText.endsWith('*/');
     const clean = tokenText.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
-
-    const stepIncrement = settings.tagClickWeightStep ?? 0.2;
-
-
-
     const items: ContextMenuItem[] = [
-
       {
-
-        label: 'Insert Line Break Before',
-
+        label: isDisabled ? `Enable '${clean}'` : `Disable '${clean}'`,
+        icon: <Check className="w-3.5 h-3.5" />,
         action: () => {
-
-          tokens.splice(index, 0, '\n');
-
+          tokens[index] = isDisabled ? clean : `/* ${clean} */`;
           setPromptTokens(target, tokens);
-
-        }
-
+        },
       },
-
       {
-
-        label: 'Insert Line Break After',
-
-        action: () => {
-
-          tokens.splice(index + 1, 0, '\n');
-
-          setPromptTokens(target, tokens);
-
-        }
-
-      },
-
-      {
-
-        separator: true,
-
-        label: isMuted ? `Enable '${clean}'` : `Disable / Comment out '${clean}'`,
-
-        action: () => {
-
-          tokens[index] = isMuted ? clean : `/* ${clean} */`;
-
-          setPromptTokens(target, tokens);
-
-        }
-
-      },
-
-      {
-
-        label: `Increase Weight (+${stepIncrement.toFixed(2)})`,
-
-        action: () => {
-
-          const match = clean.match(/^\((.*):([0-9.]+)\)$/);
-
-          if (match) {
-
-            tokens[index] = `(${match[1]}:${(parseFloat(match[2]) + stepIncrement).toFixed(2)})`;
-
-          } else {
-
-            tokens[index] = `(${clean}:${(1.0 + stepIncrement).toFixed(2)})`;
-
-          }
-
-          setPromptTokens(target, tokens);
-
-        }
-
-      },
-
-      {
-
-        label: `Decrease Weight (-${stepIncrement.toFixed(2)})`,
-
-        action: () => {
-
-          const match = clean.match(/^\((.*):([0-9.]+)\)$/);
-
-          if (match) {
-
-            tokens[index] = `(${match[1]}:${Math.max(0.1, parseFloat(match[2]) - stepIncrement).toFixed(2)})`;
-
-          } else {
-
-            tokens[index] = `(${clean}:${Math.max(0.1, 1.0 - stepIncrement).toFixed(2)})`;
-
-          }
-
-          setPromptTokens(target, tokens);
-
-        }
-
-      },
-
-      {
-
         label: target === 'positive' ? 'Move to Negative' : 'Move to Positive',
-
+        icon: <SplitSquareVertical className="w-3.5 h-3.5" />,
         action: () => {
-
           tokens.splice(index, 1);
-
           setPromptTokens(target, tokens);
-
           if (target === 'positive') {
-
             setNegativePrompt(negativePrompt.trim() ? `${negativePrompt.trim()}, ${clean}` : clean);
-
           } else {
-
             setPrompt(prompt.trim() ? `${prompt.trim()}, ${clean}` : clean);
-
           }
-
-        }
-
+        },
       },
-
       {
-
         separator: true,
-
-        label: `Delete Token`,
-
+        label: 'Delete Tag',
         danger: true,
-
         icon: <Trash2 className="w-3.5 h-3.5" />,
-
-        action: () => {
-
-          tokens.splice(index, 1);
-
-          setPromptTokens(target, tokens);
-
-        }
-
-      }
-
+        action: () => { tokens.splice(index, 1); setPromptTokens(target, tokens); },
+      },
+      {
+        separator: true,
+        label: 'Insert Line Break Before',
+        action: () => { tokens.splice(index, 0, '\n'); setPromptTokens(target, tokens); },
+      },
+      {
+        label: 'Insert Line Break After',
+        action: () => { tokens.splice(index + 1, 0, '\n'); setPromptTokens(target, tokens); },
+      },
     ];
 
-
-
     setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `Pill: ${clean}`, items });
-
   };
-
 
 
   const handleBrowserPillClick = (tag: string, e: React.MouseEvent) => {
@@ -4590,12 +4449,11 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
       return (
 
-        <div key={`caret-input-${index}`} className="inline-flex items-center shrink-0 my-0.5" onClick={(e) => e.stopPropagation()}>
+        <div key={`caret-input-${index}`} className="relative inline-flex items-center shrink-0 my-0.5" onClick={(e) => e.stopPropagation()}>
 
           <input
-
+            ref={insertTagInputRef}
             type="text"
-
             autoFocus
 
             onDrop={(e) => e.preventDefault()}
@@ -4605,6 +4463,17 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             onChange={(e) => setInsertTagInput(e.target.value)}
 
             onKeyDown={(e) => {
+
+              if (insertTagSuggestions.length > 0 && e.key === 'ArrowDown') {
+                e.preventDefault();
+                setInsertTagSuggestionIndex((index) => (index + 1) % insertTagSuggestions.length);
+                return;
+              }
+              if (insertTagSuggestions.length > 0 && e.key === 'ArrowUp') {
+                e.preventDefault();
+                setInsertTagSuggestionIndex((index) => (index - 1 + insertTagSuggestions.length) % insertTagSuggestions.length);
+                return;
+              }
 
               if (e.key === 'Backspace' && !insertTagInput) {
 
@@ -4646,7 +4515,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 const updated = [...tokens];
 
-                const trimmed = insertTagInput.trim();
+                const trimmed = insertTagSuggestions[insertTagSuggestionIndex] || insertTagInput.trim();
 
                 if (e.shiftKey || !trimmed) {
 
@@ -4682,7 +4551,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                 e.preventDefault();
 
-                const trimmed = insertTagInput.replace(/,/g, '').trim();
+                const trimmed = insertTagSuggestions[insertTagSuggestionIndex] || insertTagInput.replace(/,/g, '').trim();
 
                 if (trimmed) {
 
@@ -4731,6 +4600,19 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             className="bg-black text-cyan-300 border border-cyan-400 rounded px-2 py-0.5 text-[10px] font-mono outline-none shadow-[0_0_8px_rgba(6,182,212,0.6)] min-w-[120px]"
 
           />
+          {insertTagSuggestions.length > 0 && insertTagSuggestionPosition && createPortal(
+            <div role="listbox" style={{ position: 'fixed', left: insertTagSuggestionPosition.left, top: insertTagSuggestionPosition.top, width: insertTagSuggestionPosition.width, maxHeight: insertTagSuggestionPosition.maxHeight }} className="z-[2500] overflow-y-auto rounded-lg border border-cyan-700/60 bg-[#10131a] p-1 shadow-2xl">
+              {insertTagSuggestions.map((suggestion, suggestionIndex) => <button key={`${suggestion}-${suggestionIndex}`} type="button" role="option" aria-selected={suggestionIndex === insertTagSuggestionIndex} onMouseDown={(event) => event.preventDefault()} onClick={() => {
+                const updated = [...tokens];
+                updated.splice(index, 0, suggestion);
+                setPromptTokens(target, updated);
+                setActiveInsertion({ target, index: index + 1 });
+                setInsertTagInput('');
+                setInsertTagSuggestions([]);
+              }} className={`block w-full rounded px-2 py-1.5 text-left text-[11px] ${suggestionIndex === insertTagSuggestionIndex ? 'bg-cyan-900/50 text-cyan-200' : 'text-zinc-300 hover:bg-white/5'}`}>{suggestion.replace(/_/g, ' ')}</button>)}
+              <div className="px-2 py-1 text-[9px] text-zinc-500">↑ / ↓ navigate · Enter to add · Esc to dismiss</div>
+            </div>, document.body
+          )}
 
         </div>
 
@@ -5335,6 +5217,15 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             >
               Expand
             </button>
+            <button
+              type="button"
+              onClick={() => setHideCollapsedPromptSections((hidden) => !hidden)}
+              className={`px-1.5 py-0.5 rounded text-[8px] font-mono cursor-pointer shrink-0 ${hideCollapsedPromptSections ? 'bg-cyan-500/10 text-cyan-300' : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'}`}
+              title={hideCollapsedPromptSections ? 'Show collapsed prompt sections' : 'Hide collapsed prompt sections'}
+              aria-pressed={hideCollapsedPromptSections}
+            >
+              {hideCollapsedPromptSections ? 'Show hidden' : 'Hide collapsed'}
+            </button>
           </>
         )}
         <div className="flex-1" />
@@ -5360,7 +5251,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         <button type="button" onClick={() => adjustSelectedPromptWeights(target, -step)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-amber-300 hover:bg-amber-500/10 shrink-0" title={`Decrease weight by ${step}`}><Minus className="w-2.5 h-2.5 inline" /> W</button>
         <button type="button" onClick={() => adjustSelectedPromptWeights(target, step)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-cyan-300 hover:bg-cyan-500/10 shrink-0" title={`Increase weight by ${step}`}><Plus className="w-2.5 h-2.5 inline" /> W</button>
         <button type="button" onClick={() => normalizeSelectedPromptWeights(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-300 hover:bg-white/5 shrink-0" title="Remove explicit weights">1.00</button>
-        <button type="button" onClick={() => toggleSelectedPromptMuted(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-300 hover:bg-white/5 shrink-0" title={allMuted ? 'Enable selected tags' : 'Disable / comment out selected tags'}>{allMuted ? 'Enable' : 'Mute'}</button>
+        <button type="button" onClick={() => toggleSelectedPromptMuted(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-zinc-300 hover:bg-white/5 shrink-0" title={allMuted ? 'Enable selected tags' : 'Disable selected tags'}>{allMuted ? 'Enable' : 'Disable'}</button>
         <button type="button" onClick={() => void copySelectedPromptTokens(target)} className="p-1 rounded text-zinc-400 hover:text-white hover:bg-white/5 shrink-0" title="Copy selected tags"><Copy className="w-3 h-3" /></button>
         <button type="button" onClick={() => extractSelectedPromptSection(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-purple-300 hover:bg-purple-500/10 shrink-0" title="Move selected tags into a new prompt section">New Section</button>
         <button type="button" onClick={() => moveSelectedPromptTokens(target)} className="px-1.5 py-0.5 rounded text-[9px] font-mono text-indigo-300 hover:bg-indigo-500/10 shrink-0" title="Move selection to the other prompt">→ {target === 'positive' ? 'Neg' : 'Pos'}</button>
@@ -5386,9 +5277,12 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     const focusIndex = focusedPromptSection[target] !== null && focusedPromptSection[target]! < lineRows.length
       ? focusedPromptSection[target]
       : null;
-    const visibleLineRows = focusIndex === null
+    const visibleLineRowsBase = focusIndex === null
       ? lineRows
       : lineRows.filter((row) => row.lineIndex === focusIndex);
+    const visibleLineRows = hideCollapsedPromptSections
+      ? visibleLineRowsBase.filter((row) => !collapsedPromptSections[target].includes(row.lineIndex))
+      : visibleLineRowsBase;
 
 
 
@@ -5654,51 +5548,60 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                       draggable={!isCurrentlyEditing && selectedTokens[target].size <= 1}
 
                       onDragStart={(e) => {
-
-                        draggedPillRef.current = { target, index: idx };
-
-                        // Take full control of the drag payload so no default browser
-                        // behavior (e.g. dropping raw text into an input elsewhere) can run
-                        // alongside our own reorder logic.
+                        e.stopPropagation();
+                        // Mouse selection and HTML5 drag share the same pointer sequence. Freeze
+                        // range-selection as soon as native dragging starts so mouseenter events
+                        // cannot keep changing selection/draggable state under the drag cursor.
+                        pillDragActiveRef.current = true;
+                        setIsSelecting(false);
+                        const originalTokens = getFreshPromptTokens(target);
+                        draggedPillRef.current = { target, fromIndex: idx, targetIndex: idx, originalTokens };
+                        setDragOverPill(null);
                         e.dataTransfer.effectAllowed = 'move';
-
-                        e.dataTransfer.setData('text/plain', '');
-
+                        e.dataTransfer.setData('text/plain', `swarm-prompt-pill:${target}:${idx}`);
                       }}
 
                       onDragOver={(e) => {
-
                         e.preventDefault();
-
+                        e.stopPropagation();
                         const dragged = draggedPillRef.current;
-
-                        if (!dragged || dragged.target !== target || dragged.index === idx) return;
-
-                        const fresh = getFreshPromptTokens(target);
-
-                        if (dragged.index >= fresh.length) { draggedPillRef.current = { target, index: idx }; return; }
-
-                        const updated = [...fresh];
-
-                        const [moved] = updated.splice(dragged.index, 1);
-
-                        updated.splice(idx, 0, moved);
-
-                        draggedPillRef.current = { target, index: idx };
-
-                        setPromptTokens(target, updated);
-
+                        if (!pillDragActiveRef.current || !dragged || dragged.target !== target || dragged.fromIndex === idx) return;
+                        if (dragged.targetIndex !== idx) {
+                          dragged.targetIndex = idx;
+                          setDragOverPill({ target, index: idx });
+                        }
                       }}
 
                       onDrop={(e) => {
-
                         e.preventDefault();
-
                         e.stopPropagation();
-
+                        const dragged = draggedPillRef.current;
+                        if (!pillDragActiveRef.current || !dragged || dragged.target !== target || dragged.fromIndex === idx) {
+                          draggedPillRef.current = null;
+                          pillDragActiveRef.current = false;
+                          setDragOverPill(null);
+                          return;
+                        }
+                        // Reorder exactly once on drop, using the immutable drag-start snapshot.
+                        // Reordering on every dragover caused rapid swaps and stale-index corruption.
+                        const updated = [...dragged.originalTokens];
+                        const dropIndex = Number.isInteger(dragged.targetIndex) ? dragged.targetIndex : idx;
+                        if (dragged.fromIndex < updated.length && dropIndex >= 0 && dropIndex < updated.length) {
+                          const [moved] = updated.splice(dragged.fromIndex, 1);
+                          // The hovered pill's index is from the pre-drop list. Once the
+                          // source is removed, targets to its right shift one place left.
+                          // Insert immediately before the hovered tag for stable ordering.
+                          const insertionIndex = dropIndex > dragged.fromIndex ? dropIndex - 1 : dropIndex;
+                          updated.splice(Math.max(0, Math.min(insertionIndex, updated.length)), 0, moved);
+                          setPromptTokens(target, updated);
+                          setSelectedTokens((prev) => ({ ...prev, [target]: new Set() }));
+                        }
+                        draggedPillRef.current = null;
+                        pillDragActiveRef.current = false;
+                        setDragOverPill(null);
                       }}
 
-                      onDragEnd={() => { draggedPillRef.current = null; }}
+                      onDragEnd={() => { draggedPillRef.current = null; pillDragActiveRef.current = false; setDragOverPill(null); }}
 
                       onMouseDown={(e) => {
 
@@ -5708,17 +5611,14 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                         setIsSelecting(true);
 
-                        selectionAnchorRef.current = idx;
-
-
-
+                        const currentAnchor = selectionAnchorRef.current;
                         const currentSet = new Set(selectedTokens[target]);
 
-                        if (e.shiftKey && selectionAnchorRef.current !== null) {
+                        if (e.shiftKey && currentAnchor !== null) {
 
-                          const start = Math.min(selectionAnchorRef.current, idx);
+                          const start = Math.min(currentAnchor, idx);
 
-                          const end = Math.max(selectionAnchorRef.current, idx);
+                          const end = Math.max(currentAnchor, idx);
 
                           for (let i = start; i <= end; i++) currentSet.add(i);
 
@@ -5733,16 +5633,17 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                           currentSet.clear();
 
                           currentSet.add(idx);
+                          selectionAnchorRef.current = idx;
 
                         }
 
-                        setSelectedTokens({ ...selectedTokens, [target]: currentSet });
+                        setSelectedTokens((prev) => ({ ...prev, [target]: currentSet }));
 
                       }}
 
                       onMouseEnter={() => {
 
-                        if (!isSelecting || selectionAnchorRef.current === null) return;
+                        if (pillDragActiveRef.current || !isSelecting || selectionAnchorRef.current === null) return;
 
                         const start = Math.min(selectionAnchorRef.current, idx);
 
@@ -5863,7 +5764,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                           toggleTokenMutedAt(target, idx);
                         }
                       }}
-                      className={`sc-prompt-pill ${isCurrentlyEditing ? 'sc-prompt-pill--editing' : ''} px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
+                      className={`sc-prompt-pill ${isCurrentlyEditing ? 'sc-prompt-pill--editing' : ''} ${dragOverPill?.target === target && dragOverPill.index === idx ? 'sc-prompt-pill--drop-target' : ''} px-2.5 py-1 rounded-lg text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1.5 border shadow-sm ${
 
                         isMuted
 
@@ -5903,7 +5804,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
                           onDrop={(e) => e.preventDefault()}
 
-                          style={{ width: `${Math.max(editingText.length + 2, 4)}ch` }}
+                          style={{ width: `${Math.max(editingText.length + 0.5, 2)}ch`, maxWidth: 'none', minWidth: 0, flex: '0 0 auto', whiteSpace: 'pre' }}
 
                           value={editingText}
 
@@ -7992,7 +7893,7 @@ export const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 
-type ExtraFilter = 'all' | 'ready' | 'missing-preview' | 'unresolved' | 'favorites' | 'pinned' | 'recent' | 'new';
+type ExtraFilter = 'all' | 'updates' | 'ready' | 'missing-preview' | 'unresolved' | 'favorites' | 'pinned' | 'recent' | 'new';
 
 
 
@@ -8000,1535 +7901,1311 @@ type ExtraFilter = 'all' | 'ready' | 'missing-preview' | 'unresolved' | 'favorit
 
 
 
-const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
+/** Image carousel like the Civitai model page: arrows, keyboard, swipe, thumbnail strip and a full-screen view. */
+const PreviewCarousel: React.FC<{
+  urls: string[];
+  name: string;
+  type: string;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
+}> = ({ urls, name, type, onLoadMore, loadingMore }) => {
+  const key = urls.join('\n');
+  const count = urls.length;
+  const [index, setIndex] = useState(0);
+  const [failed, setFailed] = useState<Set<number>>(() => new Set());
+  const [lightbox, setLightbox] = useState(false);
+  const touchStartX = useRef<number | null>(null);
+  const stripRef = useRef<HTMLDivElement | null>(null);
 
-  const {
+  useEffect(() => { setIndex(0); setFailed(new Set()); setLightbox(false); }, [key]);
 
-    modelsList, lorasList, embeddingsList, wildcardsList, loadAssets,
-
-    prompt, setPrompt, setModel, settings, updateSettings, syncCivitaiMetadata, setActiveContextMenu,
-
-    toggleModelFavorite, toggleModelPinned, setModelAlias, setCivitaiUrl, clearCivitaiUrl, refreshCivitaiItem, markModelUsed
-
-  } = useAppStore(useShallow((s) => ({
-
-    modelsList: s.modelsList, lorasList: s.lorasList, embeddingsList: s.embeddingsList, wildcardsList: s.wildcardsList,
-
-    loadAssets: s.loadAssets, prompt: s.prompt, setPrompt: s.setPrompt, setModel: s.setModel, settings: s.settings,
-
-    updateSettings: s.updateSettings, syncCivitaiMetadata: s.syncCivitaiMetadata, setActiveContextMenu: s.setActiveContextMenu,
-
-    toggleModelFavorite: s.toggleModelFavorite, toggleModelPinned: s.toggleModelPinned, setModelAlias: s.setModelAlias,
-
-    setCivitaiUrl: s.setCivitaiUrl, clearCivitaiUrl: s.clearCivitaiUrl, refreshCivitaiItem: s.refreshCivitaiItem, markModelUsed: s.markModelUsed,
-
-  })));
-
-
-
-  const [tab, setTab] = useState<'model' | 'lora' | 'embedding' | 'wildcard'>('model');
-
-  const [selectedFolder, setSelectedFolder] = useState<string>('all');
-
-  const [showFolderTree, setShowFolderTree] = useState(true);
-
-
-
-  const viewMode = settings.panelViewModes?.extraNetworks || 'cards';
-
-  const setViewMode = (mode: 'cards' | 'compact' | 'list') => {
-
-    updateSettings({
-
-      panelViewModes: {
-
-        ...settings.panelViewModes,
-
-        extraNetworks: mode,
-
-      },
-
-    });
-
-  };
-
-  const [search, setSearch] = useState('');
-
-  const deferredSearch = useDeferredValue(search);
-
-  const [weight, setWeight] = useState(settings.defaultLoraWeight || 1.0);
-
-  const [displayLimit, setDisplayLimit] = useState(100);
-
-  const [filterMode, setFilterMode] = useState<ExtraFilter>('all');
-
-  const [selectedDetails, setSelectedDetails] = useState<ModelItem | null>(null);
-
-  const [libraryStats, setLibraryStats] = useState(civitaiService.getLibraryStats());
-
-  const [libraryUnresolved, setLibraryUnresolved] = useState(civitaiService.getUnresolvedEntries());
-
-  const [libraryPath, setLibraryPath] = useState<string | null>(null);
-
-
+  const go = (delta: number) => setIndex((current) => (count ? (current + delta + count) % count : 0));
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); go(1); }
+      else if (e.key === 'Escape' && lightbox) { e.stopPropagation(); setLightbox(false); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [count, lightbox]);
 
-    setSelectedFolder('all');
-
-  }, [tab]);
-
-
-
-  const [showCivitaiModal, setShowCivitaiModal] = useState(false);
-
-  const [selectedCivitaiCategory, setSelectedCivitaiCategory] = useState<'all' | 'models' | 'loras' | 'embeddings'>('all');
-
-  const [isSyncing, setIsSyncing] = useState(false);
-
-  const [syncProgress, setSyncProgress] = useState<{ current: number; total: number; name: string } | null>(null);
-
-
-
-  const refreshLibraryUi = () => {
-
-    setLibraryStats(civitaiService.getLibraryStats());
-
-    setLibraryUnresolved(civitaiService.getUnresolvedEntries());
-
-  };
-
-
+  // Warm the browser cache for the neighbouring images so paging feels instant.
+  useEffect(() => {
+    if (count < 2) return;
+    for (const offset of [1, -1]) {
+      const neighbour = urls[(index + offset + count) % count];
+      if (neighbour) { const img = new Image(); img.referrerPolicy = 'no-referrer'; img.src = withPreviewWidth(getPreviewSource(neighbour), 1280); }
+    }
+  }, [index, key]);
 
   useEffect(() => {
-
-    void civitaiService.initialize().then(async () => {
-
-      refreshLibraryUi();
-
-      setLibraryPath(await civitaiService.getCacheLocation());
-
-    });
-
-  }, []);
-
-
-
-  useEffect(() => {
-
-    setDisplayLimit(100);
-
-  }, [tab, search]);
-
-
-
-  const getActiveList = (): ModelItem[] => {
-
-    if (tab === 'model') return modelsList;
-
-    if (tab === 'lora') return lorasList;
-
-    if (tab === 'embedding') return embeddingsList;
-
-    return wildcardsList.map((w) => ({ name: w, previewUrl: undefined }));
-
-  };
-
-
-
-  // Extract all distinct folder paths for the active category
-
-  const folderTree = useMemo(() => {
-
-    const list = getActiveList();
-
-    const folderCounts: Record<string, number> = { all: list.length, '/': 0 };
-
-
-
-    list.forEach((item) => {
-
-      const parts = item.name.split('/');
-
-      if (parts.length > 1) {
-
-        let path = '';
-
-        for (let i = 0; i < parts.length - 1; i++) {
-
-          path = path ? `${path}/${parts[i]}` : parts[i];
-
-          folderCounts[path] = (folderCounts[path] || 0) + 1;
-
-        }
-
-      } else {
-
-        folderCounts['/'] += 1;
-
-      }
-
-    });
-
-
-
-    return folderCounts;
-
-  }, [tab, modelsList, lorasList, embeddingsList, wildcardsList]);
-
-
-
-  const filtered = useMemo(() => {
-
-    const list = getActiveList();
-
-    let result = list;
-
-
-
-    if (selectedFolder !== 'all') {
-
-      if (selectedFolder === '/') {
-
-        result = result.filter((item) => !item.name.includes('/'));
-
-      } else {
-
-        result = result.filter((item) => item.name.startsWith(`${selectedFolder}/`));
-
-      }
-
-    }
-
-
-
-    if (deferredSearch.trim()) {
-
-      const q = deferredSearch.toLowerCase().trim();
-
-      result = result.filter((item) => {
-
-        const haystack = [item.name, ...(item.aliases || []), item.modelId ? String(item.modelId) : '', item.versionId ? String(item.versionId) : '', item.baseModel || '']
-
-          .join(' ')
-
-          .toLowerCase();
-
-        return haystack.includes(q);
-
-      });
-
-    }
-
-
-
-    const now = Date.now();
-
-    if (filterMode === 'ready') result = result.filter((item) => (item.civitaiCompleteness || 0) >= 100 || item.civitaiStatus === 'manual');
-
-    if (filterMode === 'missing-preview') result = result.filter((item) => !item.previewUrl && !(item.previewUrls?.length));
-
-    if (filterMode === 'unresolved') result = result.filter((item) => item.civitaiStatus === 'unresolved' || item.civitaiStatus === 'temporarily_failed' || item.civitaiStatus === 'not_found');
-
-    if (filterMode === 'favorites') result = result.filter((item) => item.favorite);
-
-    if (filterMode === 'pinned') result = result.filter((item) => item.pinned);
-
-    if (filterMode === 'recent') result = result.filter((item) => item.lastUsedAt && now - item.lastUsedAt < 7 * 24 * 60 * 60 * 1000);
-
-    if (filterMode === 'new') result = result.filter((item) => item.addedAt && now - item.addedAt < 7 * 24 * 60 * 60 * 1000);
-
-
-
-    return result;
-
-  }, [tab, modelsList, lorasList, embeddingsList, wildcardsList, deferredSearch, selectedFolder, filterMode]);
-
-
-
-  const displayedItems = useMemo(() => {
-
-    return filtered.slice(0, displayLimit);
-
-  }, [filtered, displayLimit]);
-
-
-
-  const extraScrollRef = useRef<HTMLDivElement>(null);
-
-  const [extraViewport, setExtraViewport] = useState({ width: 0, height: 0 });
-
-  const [extraScrollTop, setExtraScrollTop] = useState(0);
-
-
-
-  useEffect(() => {
-
-    const node = extraScrollRef.current;
-
-    if (!node) return;
-
-    const update = () => setExtraViewport({ width: node.clientWidth, height: node.clientHeight });
-
-    update();
-
-    const observer = new ResizeObserver(update);
-
-    observer.observe(node);
-
-    return () => observer.disconnect();
-
-  }, []);
-
-
-
-  const virtual = useMemo(() => {
-
-    if (viewMode === 'list') return { columns: 1, rowHeight: 56, start: 0, end: displayedItems.length, totalHeight: displayedItems.length * 56 };
-
-    const minCard = viewMode === 'cards' ? 180 : 110;
-
-    const gap = viewMode === 'cards' ? 10 : 6;
-
-    const columns = Math.max(1, Math.floor((Math.max(extraViewport.width, minCard) + gap) / (minCard + gap)));
-
-    const rowHeight = viewMode === 'cards' ? 205 : 128;
-
-    const rows = Math.ceil(displayedItems.length / columns);
-
-    const overscan = 3;
-
-    const first = Math.max(0, Math.floor(extraScrollTop / rowHeight) - overscan);
-
-    const last = Math.min(rows, Math.ceil((extraScrollTop + Math.max(extraViewport.height, rowHeight)) / rowHeight) + overscan);
-
-    return { columns, rowHeight, start: first, end: last, totalHeight: Math.max(rowHeight, rows * rowHeight) };
-
-  }, [viewMode, displayedItems.length, extraViewport.width, extraViewport.height, extraScrollTop]);
-
-
-
-  const virtualItems = useMemo(() => {
-
-    if (viewMode === 'list') return displayedItems;
-
-    return displayedItems.slice(virtual.start * virtual.columns, virtual.end * virtual.columns);
-
-  }, [displayedItems, viewMode, virtual.start, virtual.end, virtual.columns]);
-
-
-
-  const civitaiStats = useMemo(() => {
-
-    const list = tab === 'model' ? modelsList : tab === 'lora' ? lorasList : tab === 'embedding' ? embeddingsList : [];
-
-    const matched = list.filter((item) => item.civitaiStatus === 'matched' || item.civitaiStatus === 'manual').length;
-
-    return { matched, pending: Math.max(0, list.length - matched) };
-
-  }, [tab, modelsList, lorasList, embeddingsList]);
-
-
-
-  const handleItemClick = (item: ModelItem) => {
-
-    if (tab !== 'wildcard') markModelUsed(tab as any, item.name);
-
-    if (tab === 'model') {
-
-      setModel(item.name);
-
-
-
-      // If Keyword toggle is enabled, inject model trigger words or clean keyword
-
-      if (settings.autoInjectModelKeywords) {
-
-        const keyword = (item.triggerWords && item.triggerWords.length > 0)
-
-          ? item.triggerWords.join(', ')
-
-          : item.name.split('/').pop()?.replace(/\.[^/.]+$/, '').replace(/^[a-zA-Z0-9]+_/g, '').replace(/[_-]/g, ' ') || '';
-
-
-
-        if (keyword) {
-
-          const current = prompt.trim();
-
-          if (!current.toLowerCase().includes(keyword.toLowerCase())) {
-
-            setPrompt(current ? `${current}, ${keyword}` : keyword);
-
-          }
-
-        }
-
-      }
-
-      return;
-
-    }
-
-
-
-    let token = '';
-
-    if (tab === 'lora') {
-
-      token = `<lora:${item.name}:${weight}>`;
-
-      if (settings.autoInjectModelKeywords && item.triggerWords && item.triggerWords.length > 0) {
-
-        token = `${token}, ${item.triggerWords.join(', ')}`;
-
-      }
-
-    } else if (tab === 'embedding') {
-
-      token = `embedding:${item.name}`;
-
-    } else {
-
-      token = `<wildcard:${item.name}>`;
-
-    }
-
-
-
-    setPrompt(prompt.trim() ? `${prompt.trim()}, ${token}` : token);
-
-  };
-
-
-
-  const handleCardContextMenu = (e: React.MouseEvent, item: ModelItem) => {
-
-    e.preventDefault();
-
-    e.stopPropagation();
-
-    const isCivitaiAsset = tab !== 'wildcard';
-
-    const type = tab === 'model' ? 'model' : tab === 'lora' ? 'lora' : 'embedding';
-
-    const items: ContextMenuItem[] = [];
-
-
-
-    if (tab === 'model') {
-
-      items.push({ label: 'Set as Active Model', icon: <Check className="w-3.5 h-3.5 text-emerald-400" />, action: () => handleItemClick(item) });
-
-    } else {
-
-      items.push({ label: `Insert ${item.name}`, icon: <ArrowUpRight className="w-3.5 h-3.5" />, action: () => handleItemClick(item) });
-
-    }
-
-
-
-    if (isCivitaiAsset) {
-
-      items.push({
-
-        label: item.favorite ? 'Remove Favorite' : 'Add to Favorites',
-
-        icon: <Star className={`w-3.5 h-3.5 ${item.favorite ? 'fill-amber-300 text-amber-300' : ''}`} />,
-
-        action: () => toggleModelFavorite(type, item.name),
-
-      });
-
-      items.push({
-
-        label: item.pinned ? 'Unpin Asset' : 'Pin Asset',
-
-        icon: <span className="text-sm">📌</span>,
-
-        action: () => toggleModelPinned(type, item.name),
-
-      });
-
-
-
-      if (item.triggerWords?.length) {
-
-        items.push({ label: 'Copy Trigger Words', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.triggerWords!.join(', ')) });
-
-      }
-
-
-
-      items.push({
-
-        label: 'Set Civitai Model URL',
-
-        icon: <Globe className="w-3.5 h-3.5 text-amber-300" />,
-
-        action: async () => {
-
-          const url = window.prompt(`Paste the main Civitai model URL for ${item.name}:`, item.civitaiUrl || 'https://civitai.com/models/');
-
-          if (!url || !url.trim() || url.trim().endsWith('/')) return;
-
-          await setCivitaiUrl(type, item.name, url.trim());
-
-          await refreshCivitaiItem(type, item.name);
-
-          refreshLibraryUi();
-
-        },
-
-      });
-
-
-
-      if (item.civitaiUrl) {
-
-        items.push({ label: 'Open Civitai Model', icon: <ExternalLink className="w-3.5 h-3.5" />, action: () => window.open(item.civitaiUrl, '_blank', 'noopener,noreferrer') });
-
-        items.push({ label: 'Clear Civitai URL Override', icon: <Trash2 className="w-3.5 h-3.5 text-rose-400" />, action: () => clearCivitaiUrl(type, item.name) });
-
-      }
-
-
-
-      items.push({ label: 'Forget Stored Civitai Metadata', icon: <Trash2 className="w-3.5 h-3.5 text-rose-300" />, action: async () => {
-
-        if (!window.confirm(`Forget stored Civitai metadata for ${item.name}? Local model files will not be touched.`)) return;
-
-        civitaiService.removeLibraryEntry(item.name, type);
-
-        civitaiService.clearCache();
-
-        await loadAssets();
-
-        refreshLibraryUi();
-
-      } });
-
-      if (item.modelId || item.versionId || item.air) {
-
-        items.push({ label: 'Copy Civitai IDs / AIR', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.air || `${item.modelId || ''}${item.versionId ? `@${item.versionId}` : ''}`) });
-
-      }
-
-
-
-      items.push({
-
-        label: 'Set Local Alias',
-
-        icon: <Type className="w-3.5 h-3.5" />,
-
-        action: () => {
-
-          const alias = window.prompt(`Add a local search alias for ${item.name}:`, item.aliases?.[0] || '');
-
-          if (alias && alias.trim()) setModelAlias(type, item.name, alias.trim());
-
-        },
-
-      });
-
-      items.push({ label: 'Refresh Civitai Metadata', icon: <RotateCw className="w-3.5 h-3.5" />, action: async () => { await refreshCivitaiItem(type, item.name); refreshLibraryUi(); } });
-
-      items.push({ label: 'Show Model Details', icon: <Info className="w-3.5 h-3.5" />, action: () => setSelectedDetails(item) });
-
-      items.push({ label: 'Set Custom Preview Image (URL)', icon: <ImageIcon className="w-3.5 h-3.5" />, action: () => {
-
-        const url = window.prompt(`Paste preview image URL for ${item.name}:`, item.previewUrl || '');
-
-        if (url?.trim()) {
-
-          const key = type === 'model' ? 'modelsList' : type === 'lora' ? 'lorasList' : 'embeddingsList';
-
-          const current = (useAppStore.getState() as any)[key] as ModelItem[];
-
-          useAppStore.getState().setParams({ [key]: current.map((candidate) => candidate.name === item.name ? { ...candidate, previewUrl: url.trim(), previewUrls: [url.trim(), ...(candidate.previewUrls || [])] } : candidate) } as any);
-
-        }
-
-      }});
-
-    }
-
-    items.push({ label: 'Copy File Name', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.name) });
-
-
-
-    setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `${tab.toUpperCase()}: ${item.name}`, items });
-
-  };
-
-
-
-  const handleStartCivitaiSync = async () => {
-
-    setIsSyncing(true);
-
-    setSyncProgress(null);
-
-    await syncCivitaiMetadata(selectedCivitaiCategory, (current, total, name) => {
-
-      setSyncProgress({ current, total, name });
-
-    });
-
-    setIsSyncing(false);
-
-    refreshLibraryUi();
-
-    setShowCivitaiModal(false);
-
-  };
-
-
-
-  return (
-
-    <div
-
-      className="h-full p-3 bg-[#10131a] flex flex-col gap-2.5 text-xs select-none overflow-hidden"
-
-      style={{ zoom: `${settings.sectionScales.extranetworks}%` }}
-
+    const el = stripRef.current?.children[index] as HTMLElement | undefined;
+    el?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }, [index]);
+
+  if (!count) {
+    return <div className="aspect-square rounded-xl overflow-hidden border border-white/10 bg-black/40"><ModelPreview name={name} type={type} className="w-full h-full object-contain" /></div>;
+  }
+
+  const mainSrc = withPreviewWidth(getPreviewSource(urls[index]), 1280);
+  const arrow = (side: 'left' | 'right', size: string) => (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); go(side === 'left' ? -1 : 1); }}
+      className={`absolute ${side === 'left' ? 'left-2' : 'right-2'} top-1/2 -translate-y-1/2 ${size} rounded-full bg-black/60 hover:bg-black/85 text-white text-lg leading-none flex items-center justify-center cursor-pointer transition`}
+      aria-label={side === 'left' ? 'Previous image' : 'Next image'}
     >
-
-      <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
-
-        <div className="flex gap-1 overflow-x-auto scrollbar-none">
-
-          <button
-
-            onClick={() => setTab('model')}
-
-            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'model' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
-
-          >
-
-            Models ({modelsList.length})
-
-          </button>
-
-          <button
-
-            onClick={() => setTab('lora')}
-
-            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'lora' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
-
-          >
-
-            LoRAs ({lorasList.length})
-
-          </button>
-
-          <button
-
-            onClick={() => setTab('embedding')}
-
-            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'embedding' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
-
-          >
-
-            Embeddings ({embeddingsList.length})
-
-          </button>
-
-          <button
-
-            onClick={() => setTab('wildcard')}
-
-            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'wildcard' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
-
-          >
-
-            Wildcards ({wildcardsList.length})
-
-          </button>
-
-        </div>
-
-
-
-        <div className="flex items-center gap-1.5">
-
-          {/* Keyword Injection Toggle */}
-
-          <button
-
-            type="button"
-
-            onClick={() => updateSettings({ autoInjectModelKeywords: !settings.autoInjectModelKeywords })}
-
-            className={`px-2 py-0.5 rounded text-[10px] font-mono border transition cursor-pointer flex items-center gap-1 ${
-
-              settings.autoInjectModelKeywords
-
-                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/40 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
-
-                : 'bg-[#181a20] border-[#2b2f3a] text-zinc-400 hover:text-zinc-200'
-
-            }`}
-
-            title="Toggle adding keywords/trigger words to prompt box when clicking a model or lora"
-
-          >
-
-            <Sparkles className="w-3 h-3 text-amber-400" />
-
-            <span>Keyword: {settings.autoInjectModelKeywords ? 'ON' : 'OFF'}</span>
-
-          </button>
-
-
-
-          <button
-
-            onClick={() => setShowCivitaiModal(true)}
-
-            className="px-2 py-0.5 bg-[#1f2330] hover:bg-amber-800 hover:text-white border border-[#2d3245] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
-
-          >
-
-            <Globe className="w-3 h-3" />
-
-            <span>Civitai Meta</span>
-
-          </button>
-
-
-
-
-
-
-          <div className="flex items-center bg-[#0d0e14] border border-white/10 rounded-lg p-0.5">
-
-            <button
-
-              type="button"
-
-              onClick={() => setViewMode('cards')}
-
-              className={`p-1 rounded cursor-pointer transition ${viewMode === 'cards' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
-
-              title="Cards View"
-
-            >
-
-              <Grid className="w-3.5 h-3.5" />
-
-            </button>
-
-            <button
-
-              type="button"
-
-              onClick={() => setViewMode('compact')}
-
-              className={`p-1 rounded cursor-pointer transition ${viewMode === 'compact' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
-
-              title="Compact Dense View"
-
-            >
-
-              <LayoutGrid className="w-3.5 h-3.5" />
-
-            </button>
-
-            <button
-
-              type="button"
-
-              onClick={() => setViewMode('list')}
-
-              className={`p-1 rounded cursor-pointer transition ${viewMode === 'list' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
-
-              title="List View"
-
-            >
-
-              <List className="w-3.5 h-3.5" />
-
-            </button>
-
-          </div>
-
-          <button onClick={() => void loadAssets(true)} title="Refresh model, LoRA and embedding catalogs" aria-label="Refresh asset catalogs" className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer">
-
-            <RotateCw className="w-3 h-3" />
-
-          </button>
-
-        </div>
-
-      </div>
-
-
-
-      <div className="flex gap-2 items-center">
-
-        <button
-
-          type="button"
-
-          onClick={() => setShowFolderTree(!showFolderTree)}
-
-          className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono flex items-center gap-1.5 transition cursor-pointer ${
-
-            showFolderTree
-
-              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/40 shadow-[0_0_8px_rgba(6,182,212,0.25)]'
-
-              : 'bg-[#181a20] border-[#2b2f3a] text-zinc-400 hover:text-white'
-
-          }`}
-
-          title="Toggle Folder Tree"
-
-        >
-
-          <Layers className="w-3.5 h-3.5" />
-
-          <span>Tree</span>
-
-        </button>
-
-
-
-        <div className="relative flex-1">
-
-          <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-gray-400" />
-
-          <input
-
-            type="text"
-
-            value={search}
-
-            onChange={(e) => setSearch(e.target.value)}
-
-            placeholder={`Search ${tab}s...`}
-
-            className="w-full bg-[#181a20] border border-[#2b2f3a] rounded pl-7 pr-2 py-1 text-xs text-gray-200 outline-none"
-
-          />
-
-        </div>
-
-
-
-        <select
-
-          value={filterMode}
-
-          onChange={(e) => setFilterMode(e.target.value as ExtraFilter)}
-
-          className="bg-[#15110b] border border-amber-900/50 rounded px-2 py-1 text-[10px] text-amber-100 outline-none shrink-0"
-
-          title="Filter Extra Networks assets"
-
-        >
-
-          <option value="all">All</option>
-
-          <option value="ready">Metadata Ready</option>
-
-          <option value="missing-preview">Missing Preview</option>
-
-          <option value="unresolved">Unresolved</option>
-
-          <option value="favorites">Favorites</option>
-
-          <option value="pinned">Pinned</option>
-
-          <option value="recent">Recent</option>
-
-        </select>
-
-
-
-        <span className="text-[10px] font-mono text-gray-500 shrink-0">
-
-          Showing {Math.min(displayLimit, filtered.length)} of {filtered.length}
-
-        </span>
-
-        {tab !== 'wildcard' && (civitaiStats.matched > 0 || civitaiStats.pending > 0) && (
-
-          <span className="hidden xl:inline text-[10px] font-mono text-zinc-600 shrink-0" title="Civitai metadata status for this catalog">
-
-            Civitai: <span className="text-emerald-400">{civitaiStats.matched}</span>/<span className="text-zinc-500">{civitaiStats.pending}</span>
-
-          </span>
-
-        )}
-
-        {tab !== 'wildcard' && <span className="hidden 2xl:inline text-[10px] font-mono text-zinc-600 shrink-0" title="Persistent local Civitai library">Library: <span className="text-amber-300">{libraryStats.matched}</span> ✓ <span className="text-rose-300">{libraryStats.unresolved}</span> unresolved</span>}
-
-
-
-        {tab === 'lora' && (
-
-          <div className="flex items-center gap-1 bg-[#181a20] border border-[#2b2f3a] px-2 rounded">
-
-            <span className="text-[10px] text-gray-400">Weight:</span>
-
-            <input
-
-              type="number"
-
-              step="0.05"
-
-              value={weight}
-
-              onChange={(e) => setWeight(Number(e.target.value))}
-
-              className="w-10 bg-transparent text-xs text-indigo-400 font-mono outline-none"
-
-            />
-
-          </div>
-
-        )}
-
-      </div>
-
-
-
-      <div className="flex-1 flex gap-2 overflow-hidden min-h-0">
-
-        {/* Tree View Folder Directory Sidebar */}
-
-        {showFolderTree && (
-
-          <div className="w-48 bg-[#090b10] border border-white/10 rounded-xl p-2 flex flex-col gap-1 overflow-y-auto shrink-0 select-none font-mono text-xs">
-
-            <span className="text-[10px] uppercase font-bold text-zinc-500 px-1 py-0.5 tracking-wider">
-
-              Folders
-
-            </span>
-
-
-
-            <button
-
-              type="button"
-
-              onClick={() => setSelectedFolder('all')}
-
-              className={`px-2 py-1 rounded-md text-left text-[11px] truncate flex items-center justify-between transition cursor-pointer ${
-
-                selectedFolder === 'all'
-
-                  ? 'bg-cyan-500/20 text-cyan-300 font-semibold border border-cyan-400/30'
-
-                  : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200'
-
-              }`}
-
-            >
-
-              <span>📁 All Assets</span>
-
-              <span className="text-[10px] opacity-60">({folderTree['all'] || 0})</span>
-
-            </button>
-
-
-
-            {folderTree['/'] > 0 && (
-
-              <button
-
-                type="button"
-
-                onClick={() => setSelectedFolder('/')}
-
-                className={`px-2 py-1 rounded-md text-left text-[11px] truncate flex items-center justify-between transition cursor-pointer ${
-
-                  selectedFolder === '/'
-
-                    ? 'bg-cyan-500/20 text-cyan-300 font-semibold border border-cyan-400/30'
-
-                    : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200'
-
-                }`}
-
-              >
-
-                <span>📂 / (Root)</span>
-
-                <span className="text-[10px] opacity-60">({folderTree['/']})</span>
-
-              </button>
-
-            )}
-
-
-
-            {Object.keys(folderTree)
-
-              .filter((f) => f !== 'all' && f !== '/')
-
-              .sort()
-
-              .map((path) => {
-
-                const depth = path.split('/').length - 1;
-
-                const folderName = path.split('/').pop();
-
-                const isSelected = selectedFolder === path;
-
-
-
-                return (
-
-                  <button
-
-                    key={path}
-
-                    type="button"
-
-                    onClick={() => setSelectedFolder(path)}
-
-                    style={{ paddingLeft: `${Math.max(8, depth * 12 + 8)}px` }}
-
-                    className={`py-1 pr-2 rounded-md text-left text-[11px] truncate flex items-center justify-between transition cursor-pointer ${
-
-                      isSelected
-
-                        ? 'bg-cyan-500/20 text-cyan-300 font-semibold border border-cyan-400/30'
-
-                        : 'text-zinc-400 hover:bg-white/5 hover:text-zinc-200'
-
-                    }`}
-
-                    title={path}
-
-                  >
-
-                    <span className="truncate">📁 {folderName}</span>
-
-                    <span className="text-[10px] opacity-60 shrink-0 ml-1">({folderTree[path]})</span>
-
-                  </button>
-
-                );
-
-              })}
-
-          </div>
-
-        )}
-
-
-
-        {/* Item Layout Container */}
-
-        <div
-
-          ref={extraScrollRef}
-
-          onScroll={(e) => setExtraScrollTop(e.currentTarget.scrollTop)}
-
-          className="flex-1 min-h-0 overflow-y-auto pr-1 relative"
-
-          onKeyDown={(e) => { if (e.key === 'Home' && !e.ctrlKey) e.currentTarget.scrollTo({ top: 0 }); }}
-
-        >
-
-          <div
-
-            style={{ height: `${virtual.totalHeight}px` }}
-
-            className="relative w-full"
-
-          >
-
-            <div
-
-              className={`${viewMode === 'cards' ? 'grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-2.5' : viewMode === 'compact' ? 'grid grid-cols-[repeat(auto-fill,minmax(110px,1fr))] gap-1.5' : 'flex flex-col gap-1'} absolute inset-x-0 top-0`}
-
-              style={{ transform: `translateY(${virtual.start * virtual.rowHeight}px)` }}
-
-            >
-
-        {virtualItems.map((item) => (
-
-          <div
-
-            key={item.name}
-
-            onClick={() => handleItemClick(item)}
-
-            onContextMenu={(e) => handleCardContextMenu(e, item)}
-
-            className={`group border border-white/10 bg-[#0f1118] hover:border-amber-600/70 cursor-pointer transition shadow-xs flex [content-visibility:auto] [contain-intrinsic-size:220px] ${
-
-              viewMode === 'cards'
-
-                ? 'flex-col rounded-xl overflow-hidden h-auto min-h-[175px]'
-
-                : viewMode === 'compact'
-
-                ? 'flex-col rounded-lg overflow-hidden h-32'
-
-                : 'items-center justify-between p-2 rounded-lg bg-[#0d0f16]'
-
-            }`}
-
-          >
-
-            {viewMode === 'cards' ? (
-
-              <>
-
-                <div className="w-full aspect-4/3 overflow-hidden flex items-center justify-center relative bg-black/40">
-
-                  <ModelPreview
-
-                    url={item.previewUrl}
-
-                    urls={item.previewUrls}
-
-                    name={item.name}
-
-                    type={tab}
-
-                    className="w-full h-full object-cover hover:scale-105 transition-transform duration-300"
-
-                  />
-
-                  <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedDetails(item); }} className="absolute bottom-1.5 left-1.5 w-6 h-6 rounded-md bg-black/70 text-zinc-300 hover:text-amber-200 flex items-center justify-center opacity-0 group-hover:opacity-100 transition" title="View details"><Info className="w-3 h-3" /></button>
-
-                  <span className="absolute bottom-1.5 right-1.5 text-[9px] bg-black/80 font-mono text-amber-200 px-1.5 py-0.5 rounded border border-amber-800/40 uppercase font-semibold backdrop-blur-xs">
-
-                    {tab}
-
-                  </span>
-
-                  {(item.civitaiStatus === 'matched' || item.civitaiStatus === 'manual') && (
-
-                    <span className="absolute top-1.5 left-1.5 text-[8px] bg-emerald-950/85 font-mono text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/25 uppercase tracking-wide" title={`Civitai metadata ${item.civitaiStatus === 'manual' ? 'linked manually' : 'matched'}${item.civitaiMatchedBy ? ` by ${item.civitaiMatchedBy}` : ''}`}>
-
-                      CIVITAI
-
-                    </span>
-
-                  )}
-
-                  {item.civitaiStatus && item.civitaiStatus !== 'matched' && item.civitaiStatus !== 'manual' && <span className="absolute top-1.5 left-1.5 text-[8px] bg-black/85 font-mono text-amber-300 px-1.5 py-0.5 rounded border border-amber-700/30 uppercase tracking-wide">{item.civitaiStatus.replace('_',' ')}</span>}
-
-                  {item.favorite && <span className="absolute top-1.5 right-1.5 text-amber-300 text-xs">★</span>}
-
-                </div>
-
-                <div className="p-2 flex flex-col justify-center bg-[#16181a] border-t border-white/5 min-w-0 gap-0.5">
-
-                  <span className="font-mono text-zinc-100 text-[11px] font-semibold truncate" title={item.name}>
-
-                    {item.aliases?.[0] || item.name.split('/').pop()?.replace(/\.[^/.]+$/, '')}
-
-                  </span>
-
-                  {item.baseModel && <span className="text-[9px] text-zinc-500 truncate" title={item.baseModel}>Base: {item.baseModel}</span>}
-
-                  {tab !== 'wildcard' && (item.civitaiCompleteness ?? 0) > 0 && (() => { const completeness = item.civitaiCompleteness ?? 0; return (
-
-                    <div className="flex items-center gap-1.5 mt-0.5">
-
-                      <div className="h-1 flex-1 rounded-full bg-white/8 overflow-hidden"><div className={`h-full ${completeness >= 100 ? 'bg-emerald-500' : completeness >= 60 ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(100, completeness)}%` }} /></div>
-
-                      <span className={`text-[8px] font-mono ${completeness >= 100 ? 'text-emerald-300' : completeness >= 60 ? 'text-amber-300' : 'text-blue-300'}`}>{completeness}%</span>
-
-                    </div>
-
-                  ); })()}
-
-                </div>
-
-              </>
-
-            ) : viewMode === 'compact' ? (
-
-              <>
-
-                <div className="w-full flex-1 overflow-hidden flex items-center justify-center relative bg-black/40">
-
-                  <ModelPreview
-
-                    url={item.previewUrl}
-
-                    urls={item.previewUrls}
-
-                    name={item.name}
-
-                    type={tab}
-
-                    className="w-full h-full object-cover"
-
-                  />
-
-                </div>
-
-                <div className="p-1 bg-[#12141d] border-t border-white/5 truncate">
-
-                  <span className="font-mono text-zinc-300 text-[9px] truncate block" title={item.name}>
-
-                    {item.name.split('/').pop()?.replace(/\.[^/.]+$/, '')}
-
-                  </span>
-
-                </div>
-
-              </>
-
-            ) : (
-
-              <>
-
-                <div className="flex items-center gap-2 truncate min-w-0 flex-1">
-
-                  <div className="w-8 h-8 rounded overflow-hidden shrink-0 bg-black/50">
-
-                    <ModelPreview
-
-                      url={item.previewUrl}
-
-                      urls={item.previewUrls}
-
-                      name={item.name}
-
-                      type={tab}
-
-                      className="w-full h-full object-cover"
-
-                    />
-
-                  </div>
-
-                  <span className="font-medium text-zinc-300 text-xs truncate">{item.name}</span>
-
-                </div>
-
-                <span className="text-[10px] text-amber-300 font-mono bg-blue-950/30 px-2 py-0.5 rounded shrink-0 ml-2">
-
-                  {tab === 'model' ? 'Select' : '+ Insert'}
-
-                </span>
-
-              </>
-
-            )}
-
-          </div>
-
-        ))}
-
-            </div>
-
-          </div>
-
-        {displayedItems.length < filtered.length && (
-
-          <button
-
-            type="button"
-
-            onClick={() => setDisplayLimit((limit) => Math.min(limit + 100, filtered.length))}
-
-            className="sc-action-button sc-action-info col-span-full w-full shrink-0 rounded-lg px-3 py-2 text-[10px] font-mono transition"
-
-          >
-
-            Show next {Math.min(100, filtered.length - displayedItems.length)} • {filtered.length - displayedItems.length} remaining
-
-          </button>
-
-        )}
-
-        </div>
-
-      </div>
-
-
-
-      {selectedDetails && (
-
-        <div className="fixed inset-y-0 right-0 z-999998 w-[min(420px,92vw)] bg-[#0a0805]/98 border-l border-amber-800/40 shadow-2xl backdrop-blur-xl p-4 flex flex-col gap-3 overflow-y-auto">
-
-          <div className="flex items-start justify-between gap-3 border-b border-white/10 pb-3">
-
-            <div className="min-w-0">
-
-              <div className="text-[10px] uppercase tracking-[0.2em] text-amber-500/80">Asset Details</div>
-
-              <div className="font-semibold text-amber-50 text-sm break-words mt-1">{selectedDetails.name}</div>
-
-            </div>
-
-            <button type="button" onClick={() => setSelectedDetails(null)} className="px-2 py-1 rounded border border-white/10 text-zinc-500 hover:text-white hover:bg-white/5">✕</button>
-
-          </div>
-
-          <div className="aspect-square rounded-xl overflow-hidden border border-white/10 bg-black/40">
-
-            <ModelPreview url={selectedDetails.previewUrl} urls={selectedDetails.previewUrls} name={selectedDetails.name} type={tab} className="w-full h-full object-contain" />
-
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">STATUS</span><span className="text-amber-200">{selectedDetails.civitaiStatus || 'not scanned'}</span></div>
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">COMPLETENESS</span><span className="text-amber-200">{selectedDetails.civitaiCompleteness ?? 0}%</span></div>
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">MODEL ID</span><span className="text-zinc-200">{selectedDetails.modelId || '—'}</span></div>
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">VERSION ID</span><span className="text-zinc-200">{selectedDetails.versionId || '—'}</span></div>
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">VERSION</span><span className="text-zinc-200 truncate block" title={selectedDetails.versionName}>{selectedDetails.versionName || '—'}</span></div>
-
-            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">BASE MODEL</span><span className="text-zinc-200 truncate block" title={selectedDetails.baseModel}>{selectedDetails.baseModel || '—'}</span></div>
-
-          </div>
-
-          {selectedDetails.civitaiUrl && <button type="button" onClick={() => window.open(selectedDetails.civitaiUrl, '_blank', 'noopener,noreferrer')} className="w-full px-3 py-2 rounded-lg border border-amber-800/50 bg-amber-950/30 text-amber-100 text-[11px] hover:bg-amber-900/30">Open Civitai</button>}
-
-          {selectedDetails.triggerWords?.length ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Trigger words</div><div className="text-xs text-zinc-300 leading-relaxed">{selectedDetails.triggerWords.join(', ')}</div></div> : null}
-
-          {selectedDetails.description ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Description</div><div className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">{selectedDetails.description}</div></div> : null}
-
-          {selectedDetails.aliases?.length ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Aliases</div><div className="flex flex-wrap gap-1">{selectedDetails.aliases.map((alias) => <span key={alias} className="px-2 py-1 rounded bg-white/5 border border-white/10 text-zinc-300">{alias}</span>)}</div></div> : null}
-
-          {selectedDetails.civitaiError ? <div className="p-2 rounded-lg border border-rose-900/50 bg-rose-950/20 text-[10px] text-rose-300"><span className="font-semibold">Resolver:</span> {selectedDetails.civitaiError}</div> : null}
-
-        </div>
-
-      )}
-
-
-
-      {showCivitaiModal && (
-
-        <div className="fixed inset-0 z-999999 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 sc-dialog-backdrop">
-
-          <div className="w-[420px] bg-[#090b10] border border-white/10 rounded-2xl shadow-2xl p-5 text-xs text-zinc-200 flex flex-col gap-4 sc-dialog-card">
-
-            <div className="flex justify-between items-center border-b border-white/10 pb-3">
-
-              <span className="flex items-center gap-2 font-bold text-sm text-amber-300 font-mono">
-
-                <Globe className="w-4 h-4 text-amber-400" />
-
-                <span>Civitai Metadata Sync</span>
-
-              </span>
-
-              {!isSyncing && (
-
-                <button
-
-                  onClick={() => setShowCivitaiModal(false)}
-
-                  className="text-zinc-500 hover:text-white p-1 rounded-md transition"
-
-                >
-
-                  ✕
-
-                </button>
-
-              )}
-
-            </div>
-
-
-
-            <div className="grid grid-cols-2 gap-2 text-[10px]">
-
-              <button type="button" onClick={async () => { const json = await civitaiService.exportLibrary(); const blob = new Blob([json], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'swarm-canvas-civitai-library.json'; a.click(); URL.revokeObjectURL(a.href); }} className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-amber-950/30 hover:border-amber-800/50 text-zinc-300">Export Library</button>
-
-              <label className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-amber-950/30 hover:border-amber-800/50 text-zinc-300 text-center cursor-pointer">Import Library<input type="file" accept="application/json,.json" className="hidden" onChange={async (e) => { const input = e.currentTarget; try { const file = input.files?.[0]; if (!file) return; const raw = await file.text(); const imported = await civitaiService.importLibrary(raw); await loadAssets(); refreshLibraryUi(); window.alert(`Imported ${imported} Civitai asset records.`); } catch (error) { window.alert(`Could not import library: ${error instanceof Error ? error.message : 'invalid JSON'}`); } finally { input.value = ''; } }} /></label>
-
-              <button type="button" onClick={async () => { if (!window.confirm('Clear the persistent Civitai metadata and preview cache? This does not delete model files.')) return; await civitaiService.clearLibrary(); civitaiService.clearCache(); await loadAssets(); refreshLibraryUi(); }} className="px-2 py-1.5 rounded-lg border border-rose-900/40 bg-rose-950/10 hover:bg-rose-950/30 text-rose-300">Clear Cache</button>
-
-              <button type="button" onClick={async () => { const path = libraryPath || await civitaiService.getCacheLocation(); if (path) { await navigator.clipboard.writeText(path); window.alert(`Cache path copied:
-
-${path}`); } else { window.alert('The persistent cache path is available only in the desktop/Tauri build.'); } }} className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300">Copy Cache Location</button>
-
-            </div>
-
-            <div className="p-2 rounded-xl border border-amber-900/30 bg-amber-950/10 text-[10px] font-mono text-zinc-400 leading-relaxed">
-
-              <div className="flex items-center justify-between gap-2"><span className="text-amber-300">Persistent library</span><span className="text-zinc-500">{libraryStats.cachedPreviews} cached previews</span></div>
-
-              <div className="mt-1 truncate" title={libraryPath || 'Tauri app-local Civitai cache'}>{libraryPath || 'Desktop cache: app-local data / civitai'}</div>
-
-            </div>
-
-            <label className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-2.5 cursor-pointer">
-
-              <div className="min-w-0"><div className="text-zinc-200 font-semibold">Automatic background Civitai scan</div><div className="text-[9px] text-zinc-500 mt-0.5">After asset refresh, resolve missing/partial metadata in the background. Manual URL overrides still run first.</div></div>
-
-              <input type="checkbox" checked={settings.autoCivitaiScan} onChange={(e) => updateSettings({ autoCivitaiScan: e.target.checked })} className="accent-amber-500 shrink-0" />
-
-            </label>
-
-
-
-            <p className="text-zinc-400 text-[11px] leading-relaxed">
-
-              Uses exact file hashes when available, then progressively safer Civitai searches. Missing/unmatched entries can be retried without replacing successful matches.
-
-            </p>
-
-
-
-            <div className="grid grid-cols-4 gap-1.5 text-[10px] font-mono">
-
-              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">TOTAL</div><div className="text-zinc-200">{libraryStats.total}</div></div>
-
-              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">MATCHED</div><div className="text-emerald-300">{libraryStats.matched}</div></div>
-
-              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">PARTIAL</div><div className="text-amber-300">{libraryStats.partial}</div></div>
-
-              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">ISSUES</div><div className="text-rose-300">{libraryStats.unresolved + libraryStats.failed}</div></div>
-
-            </div>
-
-
-
-            {libraryUnresolved.length > 0 && <div className="max-h-40 overflow-y-auto rounded-lg border border-rose-900/40 bg-rose-950/10 divide-y divide-white/5">{libraryUnresolved.slice(0, 12).map((entry) => <div key={`${entry.type}:${entry.filename}`} className="flex items-center gap-2 px-2.5 py-2 hover:bg-white/[0.03]"><button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setShowCivitaiModal(false); setTab(entry.type as any); setSearch(entry.filename.split('/').pop() || entry.filename); setFilterMode('unresolved'); }}><div className="text-[10px] text-zinc-200 truncate">{entry.filename}</div><div className="text-[9px] text-rose-300/80 truncate">{entry.failureReason || entry.status}</div></button><button type="button" className="shrink-0 px-2 py-1 rounded border border-amber-900/50 bg-amber-950/20 text-amber-200 text-[9px]" onClick={async () => { const current = (useAppStore.getState() as any)[entry.type === 'model' ? 'modelsList' : entry.type === 'lora' ? 'lorasList' : 'embeddingsList']?.find((candidate: ModelItem) => candidate.name === entry.filename) as ModelItem | undefined; const url = window.prompt(`Paste the main Civitai model URL for ${entry.filename}:`, entry.civitaiUrl || 'https://civitai.com/models/'); if (!current || !url?.trim() || url.trim().endsWith('/')) return; await setCivitaiUrl(entry.type, entry.filename, url.trim()); await refreshCivitaiItem(entry.type, entry.filename); refreshLibraryUi(); }}>Resolve</button></div>)}</div>}
-
-
-
-            <div className="flex flex-col gap-1.5">
-
-              <label className="text-[10px] text-zinc-400 uppercase font-mono tracking-wider">Target Catalog Collection</label>
-
-              <select
-
-                disabled={isSyncing}
-
-                value={selectedCivitaiCategory}
-
-                onChange={(e) => setSelectedCivitaiCategory(e.target.value as any)}
-
-                className="w-full bg-[#12141c] border border-white/10 rounded-xl p-2 text-zinc-200 outline-none font-mono text-xs focus:border-cyan-400 cursor-pointer"
-
-              >
-
-                <option value="all">All Catalogs ({modelsList.length + lorasList.length + embeddingsList.length} items)</option>
-
-                <option value="models">Checkpoints Only ({modelsList.length} items)</option>
-
-                <option value="loras">LoRAs Only ({lorasList.length} items)</option>
-
-                <option value="embeddings">Embeddings Only ({embeddingsList.length} items)</option>
-
-              </select>
-
-            </div>
-
-
-
-            {/* Active Sync Progress Window */}
-
-            {isSyncing && (
-
-              <div className="flex flex-col gap-2 p-3 bg-black/60 border border-cyan-500/30 rounded-xl">
-
-                <div className="flex justify-between items-center text-[10px] font-mono">
-
-                  <span className="text-cyan-300 font-semibold truncate max-w-[240px]">
-
-                    {syncProgress?.name ? syncProgress.name.split('/').pop() : 'Connecting to API...'}
-
-                  </span>
-
-                  <span className="text-zinc-400 font-bold">
-
-                    {syncProgress ? `${syncProgress.current} / ${syncProgress.total}` : '0%'}
-
-                  </span>
-
-                </div>
-
-
-
-                <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-
-                  <div
-
-                    className="bg-blue-400/75 h-full transition-all duration-150 shadow-[0_0_10px_rgba(120,166,216,0.20)]"
-
-                    style={{
-
-                      width: syncProgress
-
-                        ? `${Math.round((syncProgress.current / syncProgress.total) * 100)}%`
-
-                        : '5%'
-
-                    }}
-
-                  />
-
-                </div>
-
-              </div>
-
-            )}
-
-
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
-
-              <button
-
-                disabled={isSyncing}
-
-                onClick={() => setShowCivitaiModal(false)}
-
-                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white rounded-xl transition cursor-pointer"
-
-              >
-
-                Close
-
-              </button>
-
-              <button
-
-                disabled={isSyncing}
-
-                onClick={handleStartCivitaiSync}
-
-                className="sc-generate-button px-5 py-2 rounded-xl disabled:opacity-50"
-
-              >
-
-                {isSyncing ? 'Fetching...' : 'Sync / Retry Missing'}
-
-              </button>
-
-            </div>
-
-          </div>
-
-        </div>
-
-      )}
-
-    </div>
-
+      {side === 'left' ? '‹' : '›'}
+    </button>
   );
 
+  return (
+    <div className="flex flex-col gap-2">
+      <div
+        className="relative w-full h-[min(62vh,640px)] rounded-xl overflow-hidden border border-white/10 bg-black/50 cursor-zoom-in select-none"
+        onClick={() => setLightbox(true)}
+        onTouchStart={(e) => { touchStartX.current = e.touches[0]?.clientX ?? null; }}
+        onTouchEnd={(e) => {
+          const start = touchStartX.current;
+          touchStartX.current = null;
+          const end = e.changedTouches[0]?.clientX;
+          if (start != null && end != null && Math.abs(end - start) > 40) go(end < start ? 1 : -1);
+        }}
+      >
+        {failed.has(index) ? (
+          <div className="w-full h-full flex items-center justify-center text-[11px] text-zinc-500">This image could not be loaded</div>
+        ) : (
+          <img
+            key={mainSrc}
+            src={mainSrc}
+            alt={`${name} preview ${index + 1}`}
+            referrerPolicy="no-referrer"
+            draggable={false}
+            onError={() => setFailed((prev) => new Set(prev).add(index))}
+            className="w-full h-full object-contain"
+          />
+        )}
+        {count > 1 && arrow('left', 'w-9 h-9')}
+        {count > 1 && arrow('right', 'w-9 h-9')}
+        <span className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[10px] font-mono bg-black/70 text-zinc-200 px-2 py-0.5 rounded-full">{index + 1} / {count}</span>
+        <span className="absolute top-2 right-2 text-[10px] bg-black/60 text-zinc-300 px-1.5 py-0.5 rounded">⤢ Full screen</span>
+      </div>
+      {count > 1 && (
+        <div ref={stripRef} className="flex gap-1.5 overflow-x-auto pb-1">
+          {urls.map((url, i) => (
+            <button
+              key={`${i}-${url}`}
+              type="button"
+              onClick={() => setIndex(i)}
+              className={`shrink-0 w-14 h-14 rounded-md overflow-hidden border-2 cursor-pointer transition ${i === index ? 'border-amber-400' : 'border-transparent opacity-60 hover:opacity-100'}`}
+              aria-label={`Show image ${i + 1}`}
+            >
+              <img src={withPreviewWidth(getPreviewSource(url), 160)} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover bg-black/40" />
+            </button>
+          ))}
+        </div>
+      )}
+      {onLoadMore && (
+        <button type="button" disabled={loadingMore} onClick={onLoadMore} className="self-start px-2.5 py-1 rounded-md border border-white/10 text-[10px] text-zinc-300 hover:bg-white/10 disabled:opacity-50 cursor-pointer">
+          {loadingMore ? 'Loading images…' : count < 8 ? 'Load more images from Civitai' : 'Refresh images from Civitai'}
+        </button>
+      )}
+      {lightbox && (
+        <div className="fixed inset-0 z-1000000 bg-black/92 flex items-center justify-center" onClick={() => setLightbox(false)}>
+          {failed.has(index) ? (
+            <span className="text-zinc-400 text-sm">This image could not be loaded</span>
+          ) : (
+            <img src={withPreviewWidth(getPreviewSource(urls[index]), 2048)} alt={`${name} preview ${index + 1}`} referrerPolicy="no-referrer" onClick={(e) => e.stopPropagation()} onError={() => setFailed((prev) => new Set(prev).add(index))} className="max-w-[96vw] max-h-[94vh] object-contain" />
+          )}
+          {count > 1 && arrow('left', 'w-12 h-12')}
+          {count > 1 && arrow('right', 'w-12 h-12')}
+          <button type="button" onClick={(e) => { e.stopPropagation(); setLightbox(false); }} className="absolute top-4 right-4 w-10 h-10 rounded-full bg-black/60 hover:bg-black/85 text-white cursor-pointer" aria-label="Close">✕</button>
+          <span className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs font-mono bg-black/70 text-zinc-200 px-3 py-1 rounded-full">{index + 1} / {count}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+type CivitaiToneKey = 'matched' | 'partial' | 'unresolved' | 'retry' | 'fetching' | 'none';
+const CIVITAI_TONES: Record<CivitaiToneKey, { card: string; footer: string; label: string }> = {
+  matched: { card: 'border-emerald-500/40 bg-emerald-950/50 hover:border-emerald-400/80', footer: 'bg-emerald-950/70 border-emerald-500/25', label: 'Metadata complete' },
+  partial: { card: 'border-amber-500/40 bg-amber-950/45 hover:border-amber-400/80', footer: 'bg-amber-950/65 border-amber-500/25', label: 'Partial metadata' },
+  unresolved: { card: 'border-rose-500/40 bg-rose-950/45 hover:border-rose-400/80', footer: 'bg-rose-950/65 border-rose-500/25', label: 'Not found' },
+  retry: { card: 'border-orange-500/40 bg-orange-950/45 hover:border-orange-400/80', footer: 'bg-orange-950/65 border-orange-500/25', label: 'Failed - retry' },
+  fetching: { card: 'border-sky-500/50 bg-sky-950/50 hover:border-sky-400/80 animate-pulse', footer: 'bg-sky-950/70 border-sky-500/25', label: 'Fetching…' },
+  none: { card: 'border-white/10 bg-[#0f1118] hover:border-amber-600/70', footer: 'bg-[#16181a] border-white/5', label: 'Not scanned' },
+};
+
+/** Maps an asset's Civitai metadata state to the card colour so gaps are visible at a glance. */
+function civitaiToneOf(item: ModelItem, isCivitaiAsset: boolean) {
+  if (!isCivitaiAsset) return CIVITAI_TONES.none;
+  const completeness = item.civitaiCompleteness ?? 0;
+  const status = item.civitaiStatus;
+  let key: CivitaiToneKey = 'none';
+  if (status === 'idle') key = 'fetching';
+  else if (status === 'temporarily_failed') key = 'retry';
+  else if (status === 'unresolved' || status === 'not_found') key = 'unresolved';
+  else if (status === 'matched' || (status === 'manual' && completeness >= 100) || completeness >= 100) key = 'matched';
+  else if (status === 'partial' || status === 'manual' || completeness > 0) key = 'partial';
+  return CIVITAI_TONES[key];
+}
+
+const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
+  const {
+    modelsList, lorasList, embeddingsList, wildcardsList, loadAssets,
+    prompt, setPrompt, setModel, settings, updateSettings, syncCivitaiMetadata, checkCivitaiUpdates, loadMoreCivitaiPreviews, setActiveContextMenu,
+    toggleModelFavorite, toggleModelPinned, setModelAlias, setCivitaiUrl, clearCivitaiUrl, refreshCivitaiItem, markModelUsed
+  } = useAppStore(useShallow((s) => ({
+    modelsList: s.modelsList, lorasList: s.lorasList, embeddingsList: s.embeddingsList, wildcardsList: s.wildcardsList,
+    loadAssets: s.loadAssets, prompt: s.prompt, setPrompt: s.setPrompt, setModel: s.setModel, settings: s.settings,
+    updateSettings: s.updateSettings, syncCivitaiMetadata: s.syncCivitaiMetadata, checkCivitaiUpdates: s.checkCivitaiUpdates, loadMoreCivitaiPreviews: s.loadMoreCivitaiPreviews, setActiveContextMenu: s.setActiveContextMenu,
+    toggleModelFavorite: s.toggleModelFavorite, toggleModelPinned: s.toggleModelPinned, setModelAlias: s.setModelAlias,
+    setCivitaiUrl: s.setCivitaiUrl, clearCivitaiUrl: s.clearCivitaiUrl, refreshCivitaiItem: s.refreshCivitaiItem, markModelUsed: s.markModelUsed,
+  })));
+  const [tab, setTab] = useState<'model' | 'lora' | 'embedding' | 'wildcard'>('model');
+  const [selectedFolder, setSelectedFolder] = useState<string>('all');
+  const [showFolderTree, setShowFolderTree] = useState(true);
+  const viewMode = settings.panelViewModes?.extraNetworks || 'cards';
+  const thumbFit = settings.thumbnailFit === 'fit' ? 'fit' : 'crop';
+  const thumbFitClass = thumbFit === 'fit' ? 'object-contain' : 'object-cover';
+  const largeW = Math.min(600, Math.max(220, Math.round(settings.largeCardSize || 280)));
+  const largeImgH = Math.round(largeW * 0.9);
+  const largeCardH = largeImgH + 116;
+  const setViewMode = (mode: 'cards' | 'large' | 'compact' | 'list') => {
+    updateSettings({
+      panelViewModes: {
+        ...settings.panelViewModes,
+        extraNetworks: mode,
+      },
+    });
+  };
+  const [search, setSearch] = useState('');
+  const deferredSearch = useDeferredValue(search);
+  const [weight, setWeight] = useState(settings.defaultLoraWeight || 1.0);
+  const [displayLimit, setDisplayLimit] = useState(100);
+  const [filterMode, setFilterMode] = useState<ExtraFilter>('all');
+  const [selectedDetails, setSelectedDetails] = useState<ModelItem | null>(null);
+  const [selectedNames, setSelectedNames] = useState<Set<string>>(() => new Set());
+  const selectAnchorRef = useRef<string | null>(null);
+  type MatchCandidate = Awaited<ReturnType<typeof civitaiService.findCandidates>>[number];
+  const [matchPicker, setMatchPicker] = useState<{ item: ModelItem; assetType: 'model' | 'lora' | 'embedding'; query: string; loading: boolean; candidates: MatchCandidate[]; error: string; applying: boolean; searched: boolean } | null>(null);
+  const matchPickerToken = useRef(0);
+  const [loadingMorePreviews, setLoadingMorePreviews] = useState(false);
+  useEffect(() => { setSelectedNames(new Set()); selectAnchorRef.current = null; }, [tab]);
+  const [libraryStats, setLibraryStats] = useState(civitaiService.getLibraryStats());
+  const [libraryUnresolved, setLibraryUnresolved] = useState(civitaiService.getUnresolvedEntries());
+  const [libraryPath, setLibraryPath] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedFolder('all');
+  }, [tab]);
+  const [showCivitaiModal, setShowCivitaiModal] = useState(false);
+  const [selectedCivitaiCategory, setSelectedCivitaiCategory] = useState<'all' | 'models' | 'loras' | 'embeddings'>('all');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+  const refreshLibraryUi = () => {
+    setLibraryStats(civitaiService.getLibraryStats());
+    setLibraryUnresolved(civitaiService.getUnresolvedEntries());
+  };
+  useEffect(() => {
+    void civitaiService.initialize().then(async () => {
+      refreshLibraryUi();
+      setLibraryPath(await civitaiService.getCacheLocation());
+    });
+  }, []);
+  useEffect(() => {
+    setDisplayLimit(100);
+  }, [tab, search]);
+  const getActiveList = (): ModelItem[] => {
+    if (tab === 'model') return modelsList;
+    if (tab === 'lora') return lorasList;
+    if (tab === 'embedding') return embeddingsList;
+    return wildcardsList.map((w) => ({ name: w, previewUrl: undefined }));
+  };
+  // Extract all distinct folder paths for the active category
+  const folderTree = useMemo(() => {
+    const list = getActiveList();
+    const folderCounts: Record<string, number> = { all: list.length, '/': 0 };
+    list.forEach((item) => {
+      const parts = item.name.split('/');
+      if (parts.length > 1) {
+        let path = '';
+        for (let i = 0; i < parts.length - 1; i++) {
+          path = path ? `${path}/${parts[i]}` : parts[i];
+          folderCounts[path] = (folderCounts[path] || 0) + 1;
+        }
+      } else {
+        folderCounts['/'] += 1;
+      }
+    });
+    return folderCounts;
+  }, [tab, modelsList, lorasList, embeddingsList, wildcardsList]);
+  const filtered = useMemo(() => {
+    const list = getActiveList();
+    let result = list;
+    if (selectedFolder !== 'all') {
+      if (selectedFolder === '/') {
+        result = result.filter((item) => !item.name.includes('/'));
+      } else {
+        result = result.filter((item) => item.name.startsWith(`${selectedFolder}/`));
+      }
+    }
+    if (deferredSearch.trim()) {
+      const q = deferredSearch.toLowerCase().trim();
+      result = result.filter((item) => {
+        const haystack = [item.name, ...(item.aliases || []), item.modelId ? String(item.modelId) : '', item.versionId ? String(item.versionId) : '', item.baseModel || '']
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(q);
+      });
+    }
+    const now = Date.now();
+    if (filterMode === 'updates') result = result.filter((item) => Boolean(item.civitaiUpdate));
+    if (filterMode === 'ready') result = result.filter((item) => (item.civitaiCompleteness || 0) >= 100 || item.civitaiStatus === 'manual');
+    if (filterMode === 'missing-preview') result = result.filter((item) => !item.previewUrl && !(item.previewUrls?.length));
+    if (filterMode === 'unresolved') result = result.filter((item) => item.civitaiStatus === 'unresolved' || item.civitaiStatus === 'temporarily_failed' || item.civitaiStatus === 'not_found');
+    if (filterMode === 'favorites') result = result.filter((item) => item.favorite);
+    if (filterMode === 'pinned') result = result.filter((item) => item.pinned);
+    if (filterMode === 'recent') result = result.filter((item) => item.lastUsedAt && now - item.lastUsedAt < 7 * 24 * 60 * 60 * 1000);
+    if (filterMode === 'new') result = result.filter((item) => item.addedAt && now - item.addedAt < 7 * 24 * 60 * 60 * 1000);
+    return result;
+  }, [tab, modelsList, lorasList, embeddingsList, wildcardsList, deferredSearch, selectedFolder, filterMode]);
+  const displayedItems = useMemo(() => {
+    return filtered.slice(0, displayLimit);
+  }, [filtered, displayLimit]);
+  const extraScrollRef = useRef<HTMLDivElement>(null);
+  const [extraViewport, setExtraViewport] = useState({ width: 0, height: 0 });
+  const [extraScrollTop, setExtraScrollTop] = useState(0);
+  useEffect(() => {
+    const node = extraScrollRef.current;
+    if (!node) return;
+    const update = () => setExtraViewport({ width: node.clientWidth, height: node.clientHeight });
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  const virtual = useMemo(() => {
+    if (viewMode === 'list') return { columns: 1, rowHeight: 56, start: 0, end: displayedItems.length, totalHeight: displayedItems.length * 56 };
+    const minCard = viewMode === 'large' ? largeW : viewMode === 'cards' ? 180 : 110;
+    const gap = viewMode === 'large' ? 12 : viewMode === 'cards' ? 10 : 6;
+    const columns = Math.max(1, Math.floor((Math.max(extraViewport.width, minCard) + gap) / (minCard + gap)));
+    const rowHeight = viewMode === 'large' ? largeCardH + 14 : viewMode === 'cards' ? 205 : 128;
+    const rows = Math.ceil(displayedItems.length / columns);
+    const overscan = 3;
+    const first = Math.max(0, Math.floor(extraScrollTop / rowHeight) - overscan);
+    const last = Math.min(rows, Math.ceil((extraScrollTop + Math.max(extraViewport.height, rowHeight)) / rowHeight) + overscan);
+    return { columns, rowHeight, start: first, end: last, totalHeight: Math.max(rowHeight, rows * rowHeight) };
+  }, [viewMode, largeW, largeCardH, displayedItems.length, extraViewport.width, extraViewport.height, extraScrollTop]);
+  const virtualItems = useMemo(() => {
+    if (viewMode === 'list') return displayedItems;
+    return displayedItems.slice(virtual.start * virtual.columns, virtual.end * virtual.columns);
+  }, [displayedItems, viewMode, virtual.start, virtual.end, virtual.columns]);
+  const civitaiStats = useMemo(() => {
+    const list = tab === 'model' ? modelsList : tab === 'lora' ? lorasList : tab === 'embedding' ? embeddingsList : [];
+    const matched = list.filter((item) => item.civitaiStatus === 'matched' || item.civitaiStatus === 'manual').length;
+    return { matched, pending: Math.max(0, list.length - matched) };
+  }, [tab, modelsList, lorasList, embeddingsList]);
+  const toggleSelect = (name: string) => {
+    setSelectedNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+    selectAnchorRef.current = name;
+  };
+  const selectRange = (name: string) => {
+    const names = filtered.map((entry) => entry.name);
+    const anchor = selectAnchorRef.current ? names.indexOf(selectAnchorRef.current) : -1;
+    const target = names.indexOf(name);
+    if (anchor < 0 || target < 0) { toggleSelect(name); return; }
+    const [from, to] = anchor < target ? [anchor, target] : [target, anchor];
+    setSelectedNames((prev) => {
+      const next = new Set(prev);
+      for (let i = from; i <= to; i++) next.add(names[i]);
+      return next;
+    });
+  };
+  const handleCardClick = (e: React.MouseEvent, item: ModelItem) => {
+    if (tab !== 'wildcard') {
+      if (e.shiftKey) { e.preventDefault(); selectRange(item.name); return; }
+      // While anything is selected a plain click keeps selecting instead of applying the model/LoRA.
+      if (e.ctrlKey || e.metaKey || selectedNames.size > 0) { toggleSelect(item.name); return; }
+    }
+    handleItemClick(item);
+  };
+  const selectCircle = (item: ModelItem, position: string) => {
+    if (tab === 'wildcard') return null;
+    const selected = selectedNames.has(item.name);
+    return (
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={selected}
+        aria-label={`${selected ? 'Deselect' : 'Select'} ${item.name}`}
+        title={selected ? 'Deselect' : 'Select (Shift: range)'}
+        onClick={(e) => { e.stopPropagation(); if (e.shiftKey) selectRange(item.name); else toggleSelect(item.name); }}
+        className={`${position} z-10 w-5 h-5 rounded-full border-2 flex items-center justify-center transition cursor-pointer ${selected ? 'bg-sky-500 border-sky-200 text-white opacity-100' : `bg-black/60 border-white/60 text-transparent hover:border-sky-300 focus:opacity-100 ${selectedNames.size > 0 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}`}
+      >
+        <Check className="w-3 h-3" />
+      </button>
+    );
+  };
+  const handleItemClick = (item: ModelItem) => {
+    if (tab !== 'wildcard') markModelUsed(tab as any, item.name);
+    if (tab === 'model') {
+      setModel(item.name);
+      // If Keyword toggle is enabled, inject model trigger words or clean keyword
+      if (settings.autoInjectModelKeywords) {
+        const keyword = (item.triggerWords && item.triggerWords.length > 0)
+          ? item.triggerWords.join(', ')
+          : item.name.split('/').pop()?.replace(/\.[^/.]+$/, '').replace(/^[a-zA-Z0-9]+_/g, '').replace(/[_-]/g, ' ') || '';
+        if (keyword) {
+          const current = prompt.trim();
+          if (!current.toLowerCase().includes(keyword.toLowerCase())) {
+            setPrompt(current ? `${current}, ${keyword}` : keyword);
+          }
+        }
+      }
+      return;
+    }
+    let token = '';
+    if (tab === 'lora') {
+      token = `<lora:${item.name}:${weight}>`;
+      if (settings.autoInjectModelKeywords && item.triggerWords && item.triggerWords.length > 0) {
+        token = `${token}, ${item.triggerWords.join(', ')}`;
+      }
+    } else if (tab === 'embedding') {
+      token = `embedding:${item.name}`;
+    } else {
+      token = `<wildcard:${item.name}>`;
+    }
+    setPrompt(prompt.trim() ? `${prompt.trim()}, ${token}` : token);
+  };
+  const handleCardContextMenu = (e: React.MouseEvent, item: ModelItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (tab !== 'wildcard' && selectedNames.has(item.name)) {
+      const count = selectedNames.size;
+      setActiveContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        title: `${count} SELECTED`,
+        items: [
+          { label: `Fetch Civitai Metadata (${count})`, icon: <Download className="w-3.5 h-3.5 text-amber-300" />, info: 'Looks up the selected assets that do not have complete metadata yet.', action: () => { void syncSelected(false); } },
+          { label: `Check for Updates (${count})`, icon: <RotateCw className="w-3.5 h-3.5 text-sky-300" />, info: 'Checks Civitai for newer versions of the selected assets that already have metadata.', action: () => { void runUpdateCheck({ names: Array.from(selectedNames) }); } },
+          { label: `Re-fetch All (${count})`, icon: <RotateCw className="w-3.5 h-3.5" />, info: 'Ignores stored results and looks every selected asset up again.', action: () => { void syncSelected(true); } },
+          { label: `Copy ${count} Model Names`, icon: <Copy className="w-3.5 h-3.5" />, action: () => { void navigator.clipboard.writeText(Array.from(selectedNames, (name: string) => civitaiService.cleanModelName(name)).join('\n')).then(() => emitToast(`Copied ${count} model names`, 'success')); } },
+          { label: 'Clear Selection', icon: <X className="w-3.5 h-3.5" />, action: () => setSelectedNames(new Set()) },
+        ],
+      });
+      return;
+    }
+    const isCivitaiAsset = tab !== 'wildcard';
+    const type = tab === 'model' ? 'model' : tab === 'lora' ? 'lora' : 'embedding';
+    const items: ContextMenuItem[] = [];
+    if (tab === 'model') {
+      items.push({ label: 'Set as Active Model', icon: <Check className="w-3.5 h-3.5 text-emerald-400" />, action: () => handleItemClick(item) });
+    } else {
+      items.push({ label: `Insert ${item.name}`, icon: <ArrowUpRight className="w-3.5 h-3.5" />, action: () => handleItemClick(item) });
+    }
+    if (isCivitaiAsset) {
+      items.push({
+        label: item.favorite ? 'Remove Favorite' : 'Add to Favorites',
+        icon: <Star className={`w-3.5 h-3.5 ${item.favorite ? 'fill-amber-300 text-amber-300' : ''}`} />,
+        action: () => toggleModelFavorite(type, item.name),
+      });
+      items.push({
+        label: item.pinned ? 'Unpin Asset' : 'Pin Asset',
+        icon: <span className="text-sm">📌</span>,
+        action: () => toggleModelPinned(type, item.name),
+      });
+      if (item.triggerWords?.length) {
+        items.push({ label: 'Copy Trigger Words', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.triggerWords!.join(', ')) });
+      }
+      if (item.civitaiUpdate) {
+        items.push({
+          label: `Open Newer Version (${item.civitaiUpdate.versionName || item.civitaiUpdate.versionId})`,
+          icon: <ExternalLink className="w-3.5 h-3.5 text-sky-300" />,
+          info: 'Opens the newer version on Civitai. Nothing is downloaded or changed here.',
+          action: () => window.open(item.civitaiUpdate!.url, '_blank', 'noopener,noreferrer'),
+        });
+      }
+      if (item.modelId && item.versionId) {
+        items.push({
+          label: 'Check for Update',
+          icon: <RotateCw className="w-3.5 h-3.5 text-sky-300" />,
+          action: () => { void runUpdateCheck({ names: [item.name] }); },
+        });
+      }
+      items.push({
+        label: 'Choose Civitai Match…',
+        icon: <Search className="w-3.5 h-3.5 text-amber-300" />,
+        info: 'Shows the closest Civitai models found for this file so you can pick the right one. Your pick is saved and kept by later syncs.',
+        action: () => openMatchPicker(item, type),
+      });
+      items.push({
+        label: 'Copy Model Name',
+        icon: <Copy className="w-3.5 h-3.5 text-amber-300" />,
+        info: 'Copies the file name without folder or extension, with separators turned into spaces, ready to paste into a Civitai search.',
+        action: () => {
+          const modelName = civitaiService.cleanModelName(item.name);
+          navigator.clipboard.writeText(modelName)
+            .then(() => emitToast(`Copied: ${modelName}`, 'success'))
+            .catch(() => emitToast('Clipboard access was unavailable', 'warning'));
+        },
+      });
+      items.push({
+        label: 'Search Name on Civitai',
+        icon: <Search className="w-3.5 h-3.5 text-amber-300" />,
+        action: () => window.open(civitaiService.searchUrl(item.name), '_blank', 'noopener,noreferrer'),
+      });
+      items.push({
+        label: 'Set Civitai Model URL',
+        icon: <Globe className="w-3.5 h-3.5 text-amber-300" />,
+        action: async () => {
+          const url = window.prompt(`Paste the main Civitai model URL for ${item.name}:`, item.civitaiUrl || 'https://civitai.com/models/');
+          if (!url || !url.trim() || url.trim().endsWith('/')) return;
+          await setCivitaiUrl(type, item.name, url.trim());
+          await refreshCivitaiItem(type, item.name);
+          refreshLibraryUi();
+        },
+      });
+      if (item.civitaiUrl) {
+        items.push({ label: 'Open Civitai Model', icon: <ExternalLink className="w-3.5 h-3.5" />, action: () => window.open(item.civitaiUrl, '_blank', 'noopener,noreferrer') });
+        items.push({ label: 'Clear Civitai URL Override', icon: <Trash2 className="w-3.5 h-3.5 text-rose-400" />, action: () => clearCivitaiUrl(type, item.name) });
+      }
+      items.push({ label: 'Forget Stored Civitai Metadata', icon: <Trash2 className="w-3.5 h-3.5 text-rose-300" />, action: async () => {
+        if (!window.confirm(`Forget stored Civitai metadata for ${item.name}? Local model files will not be touched.`)) return;
+        civitaiService.removeLibraryEntry(item.name, type);
+        civitaiService.clearCache();
+        await loadAssets();
+        refreshLibraryUi();
+      } });
+      if (item.modelId || item.versionId || item.air) {
+        items.push({ label: 'Copy Civitai IDs / AIR', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.air || `${item.modelId || ''}${item.versionId ? `@${item.versionId}` : ''}`) });
+      }
+      items.push({
+        label: 'Set Local Alias',
+        icon: <Type className="w-3.5 h-3.5" />,
+        action: () => {
+          const alias = window.prompt(`Add a local search alias for ${item.name}:`, item.aliases?.[0] || '');
+          if (alias && alias.trim()) setModelAlias(type, item.name, alias.trim());
+        },
+      });
+      items.push({ label: 'Refresh Civitai Metadata', icon: <RotateCw className="w-3.5 h-3.5" />, action: async () => { await refreshCivitaiItem(type, item.name); refreshLibraryUi(); } });
+      items.push({ label: 'Show Model Details', icon: <Info className="w-3.5 h-3.5" />, action: () => setSelectedDetails(item) });
+      items.push({ label: 'Set Custom Preview Image (URL)', icon: <ImageIcon className="w-3.5 h-3.5" />, action: () => {
+        const url = window.prompt(`Paste preview image URL for ${item.name}:`, item.previewUrl || '');
+        if (url?.trim()) {
+          const key = type === 'model' ? 'modelsList' : type === 'lora' ? 'lorasList' : 'embeddingsList';
+          const current = (useAppStore.getState() as any)[key] as ModelItem[];
+          useAppStore.getState().setParams({ [key]: current.map((candidate) => candidate.name === item.name ? { ...candidate, previewUrl: url.trim(), previewUrls: [url.trim(), ...(candidate.previewUrls || [])] } : candidate) } as any);
+        }
+      }});
+    }
+    items.push({ label: 'Copy File Name', icon: <Copy className="w-3.5 h-3.5" />, action: () => navigator.clipboard.writeText(item.name) });
+    setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `${tab.toUpperCase()}: ${item.name}`, items });
+  };
+  const searchMatchCandidates = async (item: ModelItem, assetType: 'model' | 'lora' | 'embedding', query?: string) => {
+    const token = ++matchPickerToken.current;
+    setMatchPicker((prev) => prev && { ...prev, loading: true, error: '' });
+    try {
+      const candidates = await civitaiService.findCandidates(item.name, assetType, { query, limit: 10 });
+      if (token !== matchPickerToken.current) return;
+      setMatchPicker((prev) => prev && { ...prev, candidates, loading: false, searched: true });
+    } catch (err) {
+      if (token !== matchPickerToken.current) return;
+      setMatchPicker((prev) => prev && { ...prev, candidates: [], loading: false, searched: true, error: err instanceof Error ? err.message : 'Search failed' });
+    }
+  };
+  const openMatchPicker = (item: ModelItem, assetType: 'model' | 'lora' | 'embedding') => {
+    setMatchPicker({ item, assetType, query: civitaiService.cleanModelName(item.name), loading: true, candidates: [], error: '', applying: false, searched: false });
+    void searchMatchCandidates(item, assetType);
+  };
+  const chooseMatchCandidate = async (candidate: MatchCandidate) => {
+    if (!matchPicker || matchPicker.applying) return;
+    const { item, assetType } = matchPicker;
+    setMatchPicker((prev) => prev && { ...prev, applying: true });
+    try {
+      // Same as "Set Civitai Model URL": the choice is stored as a manual link, so later syncs keep it.
+      await setCivitaiUrl(assetType, item.name, candidate.url);
+      await refreshCivitaiItem(assetType, item.name);
+      emitToast(`Linked ${item.name.split('/').pop()} to ${candidate.modelName}`, 'success');
+      setMatchPicker(null);
+      refreshLibraryUi();
+    } catch {
+      emitToast('Could not apply that match', 'error');
+      setMatchPicker((prev) => prev && { ...prev, applying: false });
+    }
+  };
+  const detailUrls = useMemo(
+    () => Array.from(new Set([selectedDetails?.previewUrl, ...(selectedDetails?.previewUrls || [])].filter((v): v is string => Boolean(v) && !/\.(mp4|webm|mov|m4v)(?:[?#]|$)/i.test(v)))),
+    [selectedDetails],
+  );
+  // Keep the open details panel in step with refreshes (e.g. after loading more images).
+  useEffect(() => {
+    if (!selectedDetails) return;
+    const list = tab === 'model' ? modelsList : tab === 'lora' ? lorasList : tab === 'embedding' ? embeddingsList : [];
+    const fresh = list.find((entry) => entry.name === selectedDetails.name);
+    if (fresh && fresh !== selectedDetails) setSelectedDetails(fresh);
+  }, [modelsList, lorasList, embeddingsList]);
+  const handleLoadMorePreviews = async () => {
+    if (!selectedDetails || tab === 'wildcard') return;
+    const assetType = tab === 'model' ? 'model' : tab === 'lora' ? 'lora' : 'embedding';
+    setLoadingMorePreviews(true);
+    try {
+      const count = await loadMoreCivitaiPreviews(assetType, selectedDetails.name);
+      emitToast(count ? `${count} images available for this model` : 'No additional images were found on Civitai', count ? 'success' : 'info');
+    } catch {
+      emitToast('Could not reach Civitai for more images', 'warning');
+    } finally {
+      setLoadingMorePreviews(false);
+    }
+  };
+  const runUpdateCheck = async (options: { folder?: string; names?: string[] }, category?: string) => {
+    if (tab === 'wildcard' || isSyncing) return null;
+    const scope = category || (tab === 'model' ? 'models' : tab === 'lora' ? 'loras' : 'embeddings');
+    setIsSyncing(true);
+    setSyncProgress(null);
+    try {
+      return await checkCivitaiUpdates(scope, (current, total, name) => setSyncProgress({ current, total, name }), options);
+    } finally {
+      setIsSyncing(false);
+      setSyncProgress(null);
+      refreshLibraryUi();
+    }
+  };
+  const handleFetchMissingOnly = async () => {
+    setIsSyncing(true);
+    setSyncProgress(null);
+    try {
+      await syncCivitaiMetadata(selectedCivitaiCategory, (current, total, name) => setSyncProgress({ current, total, name }), { mode: 'missing' });
+    } finally {
+      setIsSyncing(false);
+      setSyncProgress(null);
+      refreshLibraryUi();
+      setShowCivitaiModal(false);
+    }
+  };
+  const handleCheckUpdatesFromModal = async () => {
+    const result = await runUpdateCheck({}, selectedCivitaiCategory);
+    setShowCivitaiModal(false);
+    if (result && result.updates > 0) setFilterMode('updates');
+  };
+  const updateChip = (item: ModelItem) => item.civitaiUpdate ? (
+    <span className="shrink-0 text-[9px] font-mono text-sky-200 bg-sky-900/50 border border-sky-500/40 rounded px-1 py-px" title={`Newer version on Civitai: ${item.civitaiUpdate.versionName || item.civitaiUpdate.versionId}${item.civitaiUpdate.baseModel ? ` (${item.civitaiUpdate.baseModel})` : ''} - right-click to open`}>⬆ {item.civitaiUpdate.versionName || 'Update'}</span>
+  ) : null;
+  const syncFolder = (folder: string, force: boolean) => runScopedSync({ folder, force });
+  const syncSelected = (force: boolean) => runScopedSync({ names: Array.from(selectedNames), force });
+  const runScopedSync = async (options: { folder?: string; force?: boolean; names?: string[] }) => {
+    if (tab === 'wildcard' || isSyncing) return;
+    const category = tab === 'model' ? 'models' : tab === 'lora' ? 'loras' : 'embeddings';
+    setIsSyncing(true);
+    setSyncProgress(null);
+    try {
+      await syncCivitaiMetadata(category, (current, total, name) => setSyncProgress({ current, total, name }), options);
+    } finally {
+      setIsSyncing(false);
+      setSyncProgress(null);
+      refreshLibraryUi();
+    }
+  };
+  const handleFolderContextMenu = (e: React.MouseEvent, folder: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const label = folder === 'all' ? `All ${tab}s` : folder === '/' ? 'Root' : folder;
+    const items: ContextMenuItem[] = [];
+    if (tab !== 'wildcard') {
+      items.push({
+        label: 'Fetch Civitai Metadata for this Folder',
+        icon: <Download className="w-3.5 h-3.5 text-amber-300" />,
+        info: 'Looks up only the assets in this folder (and its subfolders) that do not have complete Civitai metadata yet.',
+        action: () => { void syncFolder(folder, false); },
+      });
+      items.push({
+        label: 'Check for Updates in this Folder',
+        icon: <RotateCw className="w-3.5 h-3.5 text-sky-300" />,
+        info: 'Checks Civitai for newer versions of assets in this folder that already have metadata.',
+        action: () => { void runUpdateCheck({ folder }); },
+      });
+      items.push({
+        label: 'Re-fetch All in this Folder',
+        icon: <RotateCw className="w-3.5 h-3.5" />,
+        info: 'Ignores stored results and looks every asset in this folder up again.',
+        action: () => { void syncFolder(folder, true); },
+      });
+    }
+    items.push({ label: 'Copy Folder Path', icon: <Copy className="w-3.5 h-3.5" />, action: () => { void navigator.clipboard.writeText(folder === 'all' ? '' : folder); } });
+    setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `FOLDER: ${label}`, items });
+  };
+  const renderFolderRow = (path: string, label: React.ReactNode, count: number, depth = 0, titleText?: string) => {
+    const isSelected = selectedFolder === path;
+    return (
+      <div
+        key={path}
+        className={`group/folder flex items-center rounded-md transition ${isSelected ? 'bg-cyan-500/20 border border-cyan-400/30' : 'hover:bg-white/5 border border-transparent'}`}
+        onContextMenu={(e) => handleFolderContextMenu(e, path)}
+      >
+        <button
+          type="button"
+          onClick={() => setSelectedFolder(path)}
+          style={{ paddingLeft: `${Math.max(8, depth * 12 + 8)}px` }}
+          className={`py-1 pr-1 min-w-0 flex-1 text-left text-[11px] truncate flex items-center justify-between cursor-pointer ${isSelected ? 'text-cyan-300 font-semibold' : 'text-zinc-400 hover:text-zinc-200'}`}
+          title={titleText || path}
+        >
+          <span className="truncate">{label}</span>
+          <span className="text-[10px] opacity-60 shrink-0 ml-1">({count})</span>
+        </button>
+        {tab !== 'wildcard' && (
+          <button
+            type="button"
+            disabled={isSyncing}
+            onClick={(e) => { e.stopPropagation(); void syncFolder(path, false); }}
+            className="shrink-0 mr-1 p-0.5 rounded text-zinc-500 hover:text-amber-300 hover:bg-white/10 opacity-0 group-hover/folder:opacity-100 focus:opacity-100 disabled:opacity-30 cursor-pointer"
+            title={`Fetch Civitai metadata for ${path === 'all' ? 'everything' : path === '/' ? 'root files' : path}`}
+            aria-label={`Fetch Civitai metadata for ${path}`}
+          >
+            <Download className="w-3 h-3" />
+          </button>
+        )}
+      </div>
+    );
+  };
+  const handleStartCivitaiSync = async () => {
+    setIsSyncing(true);
+    setSyncProgress(null);
+    await syncCivitaiMetadata(selectedCivitaiCategory, (current, total, name) => {
+      setSyncProgress({ current, total, name });
+    });
+    setIsSyncing(false);
+    refreshLibraryUi();
+    setShowCivitaiModal(false);
+  };
+  return (
+    <div
+      className="h-full p-3 bg-[#10131a] flex flex-col gap-2.5 text-xs select-none overflow-hidden"
+      style={{ zoom: `${settings.sectionScales.extranetworks}%` }}
+    >
+      <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
+        <div className="flex gap-1 overflow-x-auto scrollbar-none">
+          <button
+            onClick={() => setTab('model')}
+            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'model' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
+          >
+            Models ({modelsList.length})
+          </button>
+          <button
+            onClick={() => setTab('lora')}
+            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'lora' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
+          >
+            LoRAs ({lorasList.length})
+          </button>
+          <button
+            onClick={() => setTab('embedding')}
+            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'embedding' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
+          >
+            Embeddings ({embeddingsList.length})
+          </button>
+          <button
+            onClick={() => setTab('wildcard')}
+            className={`px-2.5 py-0.5 rounded text-xs cursor-pointer ${tab === 'wildcard' ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400'}`}
+          >
+            Wildcards ({wildcardsList.length})
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {/* Keyword Injection Toggle */}
+          <button
+            type="button"
+            onClick={() => updateSettings({ autoInjectModelKeywords: !settings.autoInjectModelKeywords })}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono border transition cursor-pointer flex items-center gap-1 ${
+              settings.autoInjectModelKeywords
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/40 shadow-[0_0_8px_rgba(6,182,212,0.3)]'
+                : 'bg-[#181a20] border-[#2b2f3a] text-zinc-400 hover:text-zinc-200'
+            }`}
+            title="Toggle adding keywords/trigger words to prompt box when clicking a model or lora"
+          >
+            <Sparkles className="w-3 h-3 text-amber-400" />
+            <span>Keyword: {settings.autoInjectModelKeywords ? 'ON' : 'OFF'}</span>
+          </button>
+          <button
+            onClick={() => setShowCivitaiModal(true)}
+            className="px-2 py-0.5 bg-[#1f2330] hover:bg-amber-800 hover:text-white border border-[#2d3245] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
+          >
+            <Globe className="w-3 h-3" />
+            <span>Civitai Meta</span>
+          </button>
+          <div className="flex items-center bg-[#0d0e14] border border-white/10 rounded-lg p-0.5">
+            <button
+              type="button"
+              onClick={() => setViewMode('cards')}
+              className={`p-1 rounded cursor-pointer transition ${viewMode === 'cards' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
+              title="Cards View"
+            >
+              <Grid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('large')}
+              className={`p-1 rounded cursor-pointer transition ${viewMode === 'large' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
+              title="Large Cards View"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+            </button>
+            {viewMode === 'large' && (
+              <input
+                type="range"
+                min={220}
+                max={600}
+                step={20}
+                value={largeW}
+                onChange={(e) => updateSettings({ largeCardSize: Number(e.target.value) })}
+                className="w-20 h-1 self-center accent-cyan-400 cursor-pointer"
+                title={`Card size: ${largeW}px`}
+                aria-label="Large card size"
+              />
+            )}
+            <span className="w-px h-4 bg-white/10 mx-0.5 self-center" aria-hidden="true" />
+            <button
+              type="button"
+              onClick={() => updateSettings({ thumbnailFit: thumbFit === 'fit' ? 'crop' : 'fit' })}
+              className={`p-1 rounded cursor-pointer transition ${thumbFit === 'fit' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
+              title={thumbFit === 'fit' ? 'Thumbnails: showing the whole image (click to fill and crop)' : 'Thumbnails: filling the card and cropping (click to show the whole image)'}
+              aria-pressed={thumbFit === 'fit'}
+            >
+              {thumbFit === 'fit' ? <Expand className="w-3.5 h-3.5" /> : <Crop className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('compact')}
+              className={`p-1 rounded cursor-pointer transition ${viewMode === 'compact' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
+              title="Compact Dense View"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('list')}
+              className={`p-1 rounded cursor-pointer transition ${viewMode === 'list' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-400 hover:text-white'}`}
+              title="List View"
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <button onClick={() => void loadAssets(true)} title="Refresh model, LoRA and embedding catalogs" aria-label="Refresh asset catalogs" className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer">
+            <RotateCw className="w-3 h-3" />
+          </button>
+        </div>
+      </div>
+      <div className="flex gap-2 items-center">
+        <button
+          type="button"
+          onClick={() => setShowFolderTree(!showFolderTree)}
+          className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono flex items-center gap-1.5 transition cursor-pointer ${
+            showFolderTree
+              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-400/40 shadow-[0_0_8px_rgba(6,182,212,0.25)]'
+              : 'bg-[#181a20] border-[#2b2f3a] text-zinc-400 hover:text-white'
+          }`}
+          title="Toggle Folder Tree"
+        >
+          <Layers className="w-3.5 h-3.5" />
+          <span>Tree</span>
+        </button>
+        <div className="relative flex-1">
+          <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-gray-400" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Search ${tab}s...`}
+            className="w-full bg-[#181a20] border border-[#2b2f3a] rounded pl-7 pr-2 py-1 text-xs text-gray-200 outline-none"
+          />
+        </div>
+        <select
+          value={filterMode}
+          onChange={(e) => setFilterMode(e.target.value as ExtraFilter)}
+          className="bg-[#15110b] border border-amber-900/50 rounded px-2 py-1 text-[10px] text-amber-100 outline-none shrink-0"
+          title="Filter Extra Networks assets"
+        >
+          <option value="all">All</option>
+          <option value="updates">Updates Available</option>
+          <option value="ready">Metadata Ready</option>
+          <option value="missing-preview">Missing Preview</option>
+          <option value="unresolved">Unresolved</option>
+          <option value="favorites">Favorites</option>
+          <option value="pinned">Pinned</option>
+          <option value="recent">Recent</option>
+        </select>
+        <span className="text-[10px] font-mono text-gray-500 shrink-0">
+          Showing {Math.min(displayLimit, filtered.length)} of {filtered.length}
+        </span>
+        {tab !== 'wildcard' && (civitaiStats.matched > 0 || civitaiStats.pending > 0) && (
+          <span className="hidden xl:inline text-[10px] font-mono text-zinc-600 shrink-0" title="Civitai metadata status for this catalog">
+            Civitai: <span className="text-emerald-400">{civitaiStats.matched}</span>/<span className="text-zinc-500">{civitaiStats.pending}</span>
+          </span>
+        )}
+        {tab !== 'wildcard' && <span className="hidden 2xl:inline text-[10px] font-mono text-zinc-600 shrink-0" title="Persistent local Civitai library">Library: <span className="text-amber-300">{libraryStats.matched}</span> ✓ <span className="text-rose-300">{libraryStats.unresolved}</span> unresolved</span>}
+        {tab === 'lora' && (
+          <div className="flex items-center gap-1 bg-[#181a20] border border-[#2b2f3a] px-2 rounded">
+            <span className="text-[10px] text-gray-400">Weight:</span>
+            <input
+              type="number"
+              step="0.05"
+              value={weight}
+              onChange={(e) => setWeight(Number(e.target.value))}
+              className="w-10 bg-transparent text-xs text-indigo-400 font-mono outline-none"
+            />
+          </div>
+        )}
+      </div>
+      {tab !== 'wildcard' && selectedNames.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-sky-500/40 bg-sky-950/40 px-2.5 py-1.5 text-[11px] text-sky-100">
+          <span className="font-semibold">{selectedNames.size} selected</span>
+          <button type="button" disabled={isSyncing} onClick={() => void syncSelected(false)} className="px-2 py-0.5 rounded border border-amber-700/50 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-40 cursor-pointer flex items-center gap-1" title="Fetch Civitai metadata for the selected assets that are incomplete"><Download className="w-3 h-3" /> Fetch metadata</button>
+          <button type="button" disabled={isSyncing} onClick={() => void syncSelected(true)} className="px-2 py-0.5 rounded border border-white/15 text-zinc-300 hover:bg-white/10 disabled:opacity-40 cursor-pointer flex items-center gap-1" title="Look the selected assets up again, ignoring stored results"><RotateCw className="w-3 h-3" /> Re-fetch all</button>
+          <button type="button" disabled={isSyncing} onClick={() => void runUpdateCheck({ names: Array.from(selectedNames) })} className="px-2 py-0.5 rounded border border-sky-700/50 bg-sky-950/30 text-sky-200 hover:bg-sky-900/40 disabled:opacity-40 cursor-pointer flex items-center gap-1" title="Check Civitai for newer versions of the selected assets"><RotateCw className="w-3 h-3" /> Check updates</button>
+          <button type="button" onClick={() => setSelectedNames(new Set(filtered.map((entry) => entry.name)))} className="px-2 py-0.5 rounded border border-white/15 text-zinc-300 hover:bg-white/10 cursor-pointer" title="Select everything currently listed (all pages)">Select all {filtered.length}</button>
+          <button type="button" onClick={() => setSelectedNames(new Set())} className="ml-auto px-2 py-0.5 rounded text-zinc-400 hover:text-white cursor-pointer">Clear ✕</button>
+          <span className="w-full text-[9px] text-sky-300/60">Ctrl/⌘+click toggles, Shift+click selects a range, right-click a selected card for more.</span>
+        </div>
+      )}
+      {isSyncing && syncProgress && !showCivitaiModal && (
+        <div className="flex items-center gap-2 rounded-lg border border-sky-500/30 bg-sky-950/30 px-2.5 py-1.5 text-[10px] font-mono text-sky-200">
+          <RotateCw className="w-3 h-3 animate-spin shrink-0" />
+          <div className="h-1.5 w-32 shrink-0 rounded-full bg-white/10 overflow-hidden"><div className="h-full bg-sky-400 transition-all" style={{ width: `${Math.round((syncProgress.current / Math.max(1, syncProgress.total)) * 100)}%` }} /></div>
+          <span className="shrink-0">{syncProgress.current}/{syncProgress.total}</span>
+          <span className="truncate text-sky-300/80" title={syncProgress.name}>{syncProgress.name}</span>
+        </div>
+      )}
+      <div className="flex-1 flex gap-2 overflow-hidden min-h-0">
+        {/* Tree View Folder Directory Sidebar */}
+        {showFolderTree && (
+          <div className="w-52 bg-[#090b10] border border-white/10 rounded-xl p-2 flex flex-col gap-1 overflow-y-auto shrink-0 select-none font-mono text-xs">
+            <span className="text-[10px] uppercase font-bold text-zinc-500 px-1 py-0.5 tracking-wider">
+              Folders
+            </span>
+            {renderFolderRow('all', '📁 All Assets', folderTree['all'] || 0, 0, 'All assets')}
+            {folderTree['/'] > 0 && renderFolderRow('/', '📂 / (Root)', folderTree['/'], 0, 'Files in the root folder')}
+            {Object.keys(folderTree)
+              .filter((f) => f !== 'all' && f !== '/')
+              .sort()
+              .map((path) => renderFolderRow(path, `📁 ${path.split('/').pop()}`, folderTree[path], path.split('/').length - 1))}
+            {tab !== 'wildcard' && <span className="text-[9px] text-zinc-600 px-1 pt-1 leading-snug">Right-click a folder, or hover it and press ↓, to fetch Civitai metadata for just that folder.</span>}
+          </div>
+        )}
+        {/* Item Layout Container */}
+        <div
+          ref={extraScrollRef}
+          onScroll={(e) => setExtraScrollTop(e.currentTarget.scrollTop)}
+          className="flex-1 min-h-0 overflow-y-auto pr-1 relative"
+          onKeyDown={(e) => { if (e.key === 'Home' && !e.ctrlKey) e.currentTarget.scrollTo({ top: 0 }); }}
+        >
+          {displayedItems.length === 0 && (
+            <div className="sc-empty-state absolute inset-0 z-10 flex items-center justify-center p-6 pointer-events-none">
+              <div className="pointer-events-auto flex max-w-[340px] flex-col items-center gap-3 text-center">
+                <BrandMark size={44} className="sc-empty-mark" />
+                <div className="sc-empty-title">{getActiveList().length === 0 ? `No ${tab === 'model' ? 'models' : tab === 'lora' ? 'LoRAs' : tab === 'embedding' ? 'embeddings' : 'wildcards'} loaded` : 'Nothing matches these filters'}</div>
+                <p className="sc-empty-body">{getActiveList().length === 0 ? "SwarmUI didn't return any for this list. Check that it is running and connected, then refresh." : 'Try a different search, folder or filter.'}</p>
+                <button
+                  type="button"
+                  onClick={() => { if (getActiveList().length === 0) void loadAssets(true); else { setSearch(''); setSelectedFolder('all'); setFilterMode('all'); } }}
+                  className="sc-empty-action"
+                >
+                  {getActiveList().length === 0 ? 'Refresh from SwarmUI' : 'Clear search and filters'}
+                </button>
+              </div>
+            </div>
+          )}
+          <div
+            style={{ height: `${virtual.totalHeight}px` }}
+            className="relative w-full"
+          >
+            <div
+              className={`${viewMode === 'large' ? 'grid gap-3' : viewMode === 'cards' ? 'grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-2.5' : viewMode === 'compact' ? 'grid grid-cols-[repeat(auto-fill,minmax(110px,1fr))] gap-1.5' : 'flex flex-col gap-1'} absolute inset-x-0 top-0`}
+              style={{ transform: `translateY(${virtual.start * virtual.rowHeight}px)`, ...(viewMode === 'large' ? { gridTemplateColumns: `repeat(auto-fill, minmax(${largeW}px, 1fr))` } : {}) }}
+            >
+        {virtualItems.map((item) => (
+          <div
+            key={item.name}
+            onClick={(e) => handleCardClick(e, item)}
+            onContextMenu={(e) => handleCardContextMenu(e, item)}
+            style={viewMode === 'large' ? { height: largeCardH } : undefined}
+            title={tab !== 'wildcard' ? `${civitaiToneOf(item, true).label}${item.civitaiError ? ` - ${item.civitaiError}` : ''}` : undefined}
+            className={`group relative select-none border ${civitaiToneOf(item, tab !== 'wildcard').card} ${selectedNames.has(item.name) ? 'ring-2 ring-sky-400' : ''} cursor-pointer transition shadow-xs flex [content-visibility:auto] [contain-intrinsic-size:220px] ${
+              viewMode === 'large'
+                ? 'flex-col rounded-2xl overflow-hidden'
+                : viewMode === 'cards'
+                ? 'flex-col rounded-xl overflow-hidden h-auto min-h-[175px]'
+                : viewMode === 'compact'
+                ? 'flex-col rounded-lg overflow-hidden h-32'
+                : 'items-center justify-between p-2 rounded-lg'
+            }`}
+          >
+            {selectCircle(item, viewMode === 'list' ? 'relative mr-2 shrink-0' : 'absolute top-1.5 left-1.5')}
+            {viewMode === 'cards' ? (
+              <>
+                <div className="w-full aspect-4/3 overflow-hidden flex items-center justify-center relative bg-black/40">
+                  <ModelPreview
+                    url={item.previewUrl}
+                    urls={item.previewUrls}
+                    name={item.name}
+                    type={tab}
+                    className={`w-full h-full ${thumbFitClass} hover:scale-105 transition-transform duration-300`}
+                  />
+                  <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedDetails(item); }} className="absolute bottom-1.5 left-1.5 w-6 h-6 rounded-md bg-black/70 text-zinc-300 hover:text-amber-200 flex items-center justify-center opacity-0 group-hover:opacity-100 transition" title="View details"><Info className="w-3 h-3" /></button>
+                  <span className="absolute bottom-1.5 right-1.5 text-[9px] bg-black/80 font-mono text-amber-200 px-1.5 py-0.5 rounded border border-amber-800/40 uppercase font-semibold backdrop-blur-xs">
+                    {tab}
+                  </span>
+                  {(item.civitaiStatus === 'matched' || item.civitaiStatus === 'manual') && (
+                    <span className="absolute top-1.5 left-8 text-[8px] bg-emerald-950/85 font-mono text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/25 uppercase tracking-wide" title={`Civitai metadata ${item.civitaiStatus === 'manual' ? 'linked manually' : 'matched'}${item.civitaiMatchedBy ? ` by ${item.civitaiMatchedBy}` : ''}`}>
+                      CIVITAI
+                    </span>
+                  )}
+                  {item.civitaiStatus && item.civitaiStatus !== 'matched' && item.civitaiStatus !== 'manual' && <span className="absolute top-1.5 left-8 text-[8px] bg-black/85 font-mono text-amber-300 px-1.5 py-0.5 rounded border border-amber-700/30 uppercase tracking-wide">{item.civitaiStatus.replace('_',' ')}</span>}
+                  {item.favorite && <span className="absolute top-1.5 right-1.5 text-amber-300 text-xs">★</span>}
+                </div>
+                <div className={`p-2 flex flex-col justify-center border-t min-w-0 gap-0.5 ${civitaiToneOf(item, tab !== 'wildcard').footer}`}>
+                  <span className="font-mono text-zinc-100 text-[11px] font-semibold truncate flex items-center gap-1" title={item.name}>
+                    <span className="truncate">{item.aliases?.[0] || item.name.split('/').pop()?.replace(/\.[^/.]+$/, '')}</span>
+                    {updateChip(item)}
+                  </span>
+                  {item.baseModel && <span className="text-[9px] text-zinc-500 truncate" title={item.baseModel}>Base: {item.baseModel}</span>}
+                  {tab !== 'wildcard' && (item.civitaiCompleteness ?? 0) > 0 && (() => { const completeness = item.civitaiCompleteness ?? 0; return (
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className="h-1 flex-1 rounded-full bg-white/8 overflow-hidden"><div className={`h-full ${completeness >= 100 ? 'bg-emerald-500' : completeness >= 60 ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(100, completeness)}%` }} /></div>
+                      <span className={`text-[8px] font-mono ${completeness >= 100 ? 'text-emerald-300' : completeness >= 60 ? 'text-amber-300' : 'text-blue-300'}`}>{completeness}%</span>
+                    </div>
+                  ); })()}
+                </div>
+              </>
+            ) : viewMode === 'large' ? (
+              <>
+                <div style={{ height: largeImgH }} className="w-full shrink-0 overflow-hidden relative bg-black/40">
+                  <ModelPreview
+                    url={item.previewUrl}
+                    urls={item.previewUrls}
+                    name={item.name}
+                    type={tab}
+                    hiRes={largeW >= 340}
+                    className={`w-full h-full ${thumbFitClass} hover:scale-105 transition-transform duration-300`}
+                  />
+                  <button type="button" onClick={(e) => { e.stopPropagation(); setSelectedDetails(item); }} className="absolute bottom-2 left-2 w-7 h-7 rounded-md bg-black/70 text-zinc-300 hover:text-amber-200 flex items-center justify-center opacity-0 group-hover:opacity-100 transition" title="View details"><Info className="w-3.5 h-3.5" /></button>
+                  <span className="absolute bottom-2 right-2 text-[10px] bg-black/80 font-mono text-amber-200 px-1.5 py-0.5 rounded border border-amber-800/40 uppercase font-semibold backdrop-blur-xs">{tab}</span>
+                  {tab !== 'wildcard' && <span className="absolute top-2 left-9 text-[9px] bg-black/80 font-mono text-zinc-100 px-1.5 py-0.5 rounded border border-white/15 uppercase tracking-wide">{civitaiToneOf(item, true).label}</span>}
+                  {item.favorite && <span className="absolute top-2 right-2 text-amber-300 text-sm">★</span>}
+                </div>
+                <div className={`p-2.5 flex-1 min-h-0 flex flex-col gap-1 border-t min-w-0 ${civitaiToneOf(item, tab !== 'wildcard').footer}`}>
+                  <span className="font-mono text-zinc-100 text-[13px] font-semibold truncate flex items-center gap-1.5" title={item.name}>
+                    <span className="truncate">{item.aliases?.[0] || item.name.split('/').pop()?.replace(/\.[^/.]+$/, '')}</span>
+                    {updateChip(item)}
+                  </span>
+                  {item.modelName && <span className="text-[10px] text-zinc-300 truncate" title={`${item.modelName}${item.versionName ? ` - ${item.versionName}` : ''}`}>Civitai: {item.modelName}{item.versionName ? ` · ${item.versionName}` : ''}</span>}
+                  {item.baseModel && <span className="text-[10px] text-zinc-500 truncate" title={item.baseModel}>Base: {item.baseModel}</span>}
+                  {item.triggerWords?.length ? <span className="text-[10px] text-zinc-500 truncate" title={item.triggerWords.join(', ')}>Triggers: {item.triggerWords.join(', ')}</span> : null}
+                  {tab !== 'wildcard' && item.civitaiError && !(item.civitaiCompleteness ?? 0) && <span className="text-[10px] text-rose-300/90 truncate" title={item.civitaiError}>{item.civitaiError}</span>}
+                  {tab !== 'wildcard' && (item.civitaiCompleteness ?? 0) > 0 && (() => { const completeness = item.civitaiCompleteness ?? 0; return (
+                    <div className="flex items-center gap-1.5 mt-auto">
+                      <div className="h-1.5 flex-1 rounded-full bg-white/10 overflow-hidden"><div className={`h-full ${completeness >= 100 ? 'bg-emerald-500' : completeness >= 60 ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(100, completeness)}%` }} /></div>
+                      <span className={`text-[9px] font-mono ${completeness >= 100 ? 'text-emerald-300' : completeness >= 60 ? 'text-amber-300' : 'text-blue-300'}`}>{completeness}%</span>
+                    </div>
+                  ); })()}
+                </div>
+              </>
+            ) : viewMode === 'compact' ? (
+              <>
+                <div className="w-full flex-1 overflow-hidden flex items-center justify-center relative bg-black/40">
+                  <ModelPreview
+                    url={item.previewUrl}
+                    urls={item.previewUrls}
+                    name={item.name}
+                    type={tab}
+                    className={`w-full h-full ${thumbFitClass}`}
+                  />
+                </div>
+                <div className={`p-1 border-t truncate ${civitaiToneOf(item, tab !== 'wildcard').footer}`}>
+                  <span className="font-mono text-zinc-300 text-[9px] truncate block" title={item.name}>
+                    {item.civitaiUpdate ? '⬆ ' : ''}{item.name.split('/').pop()?.replace(/\.[^/.]+$/, '')}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 truncate min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded overflow-hidden shrink-0 bg-black/50">
+                    <ModelPreview
+                      url={item.previewUrl}
+                      urls={item.previewUrls}
+                      name={item.name}
+                      type={tab}
+                      className={`w-full h-full ${thumbFitClass}`}
+                    />
+                  </div>
+                  <span className="font-medium text-zinc-300 text-xs truncate">{item.name}</span>
+                  {updateChip(item)}
+                </div>
+                <span className="text-[10px] text-amber-300 font-mono bg-blue-950/30 px-2 py-0.5 rounded shrink-0 ml-2">
+                  {tab === 'model' ? 'Select' : '+ Insert'}
+                </span>
+              </>
+            )}
+          </div>
+        ))}
+            </div>
+          </div>
+        {displayedItems.length < filtered.length && (
+          <button
+            type="button"
+            onClick={() => setDisplayLimit((limit) => Math.min(limit + 100, filtered.length))}
+            className="sc-action-button sc-action-info col-span-full w-full shrink-0 rounded-lg px-3 py-2 text-[10px] font-mono transition"
+          >
+            Show next {Math.min(100, filtered.length - displayedItems.length)} • {filtered.length - displayedItems.length} remaining
+          </button>
+        )}
+        </div>
+      </div>
+      {selectedDetails && (
+        <div className="fixed inset-y-0 right-0 z-999998 w-[min(620px,94vw)] bg-[#0a0805]/98 border-l border-amber-800/40 shadow-2xl backdrop-blur-xl p-4 flex flex-col gap-3 overflow-y-auto">
+          <div className="flex items-start justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="min-w-0">
+              <div className="text-[10px] uppercase tracking-[0.2em] text-amber-500/80">Asset Details</div>
+              <div className="font-semibold text-amber-50 text-sm break-words mt-1">{selectedDetails.name}</div>
+            </div>
+            <button type="button" onClick={() => setSelectedDetails(null)} className="px-2 py-1 rounded border border-white/10 text-zinc-500 hover:text-white hover:bg-white/5">✕</button>
+          </div>
+          <PreviewCarousel
+            urls={detailUrls}
+            name={selectedDetails.name}
+            type={tab}
+            onLoadMore={tab !== 'wildcard' && (selectedDetails.modelId || selectedDetails.versionId) ? () => { void handleLoadMorePreviews(); } : undefined}
+            loadingMore={loadingMorePreviews}
+          />
+          <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">STATUS</span><span className="text-amber-200">{selectedDetails.civitaiStatus || 'not scanned'}</span></div>
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">COMPLETENESS</span><span className="text-amber-200">{selectedDetails.civitaiCompleteness ?? 0}%</span></div>
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">MODEL ID</span><span className="text-zinc-200">{selectedDetails.modelId || '—'}</span></div>
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">VERSION ID</span><span className="text-zinc-200">{selectedDetails.versionId || '—'}</span></div>
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">VERSION</span><span className="text-zinc-200 truncate block" title={selectedDetails.versionName}>{selectedDetails.versionName || '—'}</span></div>
+            <div className="p-2 rounded-lg bg-white/[0.03] border border-white/10"><span className="text-zinc-600 block">BASE MODEL</span><span className="text-zinc-200 truncate block" title={selectedDetails.baseModel}>{selectedDetails.baseModel || '—'}</span></div>
+          </div>
+          {selectedDetails.civitaiUrl && <button type="button" onClick={() => window.open(selectedDetails.civitaiUrl, '_blank', 'noopener,noreferrer')} className="w-full px-3 py-2 rounded-lg border border-amber-800/50 bg-amber-950/30 text-amber-100 text-[11px] hover:bg-amber-900/30">Open Civitai</button>}
+          {selectedDetails.triggerWords?.length ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Trigger words</div><div className="text-xs text-zinc-300 leading-relaxed">{selectedDetails.triggerWords.join(', ')}</div></div> : null}
+          {selectedDetails.description ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Description</div><div className="text-xs text-zinc-400 leading-relaxed whitespace-pre-wrap">{selectedDetails.description}</div></div> : null}
+          {selectedDetails.aliases?.length ? <div><div className="text-[10px] uppercase tracking-widest text-zinc-600 mb-1">Aliases</div><div className="flex flex-wrap gap-1">{selectedDetails.aliases.map((alias) => <span key={alias} className="px-2 py-1 rounded bg-white/5 border border-white/10 text-zinc-300">{alias}</span>)}</div></div> : null}
+          {selectedDetails.civitaiError ? <div className="p-2 rounded-lg border border-rose-900/50 bg-rose-950/20 text-[10px] text-rose-300"><span className="font-semibold">Resolver:</span> {selectedDetails.civitaiError}</div> : null}
+        </div>
+      )}
+      {matchPicker && (
+        <div className="fixed inset-0 z-999999 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 sc-dialog-backdrop" onClick={() => !matchPicker.applying && setMatchPicker(null)}>
+          <div className="w-[600px] max-w-full max-h-[85vh] bg-[#090b10] border border-white/10 rounded-2xl shadow-2xl p-4 text-xs text-zinc-200 flex flex-col gap-3 sc-dialog-card" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 border-b border-white/10 pb-2.5">
+              <div className="min-w-0">
+                <span className="flex items-center gap-2 font-bold text-sm text-amber-300 font-mono"><Globe className="w-4 h-4 text-amber-400" /> Choose Civitai match</span>
+                <span className="block mt-1 font-mono text-[10px] text-zinc-500 truncate" title={matchPicker.item.name}>{matchPicker.item.name}</span>
+              </div>
+              <button type="button" onClick={() => setMatchPicker(null)} disabled={matchPicker.applying} className="text-zinc-500 hover:text-white p-1 rounded-md transition cursor-pointer" aria-label="Close">✕</button>
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={matchPicker.query}
+                onChange={(e) => setMatchPicker((prev) => prev && { ...prev, query: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') void searchMatchCandidates(matchPicker.item, matchPicker.assetType, matchPicker.query); }}
+                placeholder="Search Civitai, or paste a model link"
+                className="flex-1 rounded-lg border border-white/10 bg-[#0d0e14] px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-amber-700/60"
+              />
+              <button type="button" disabled={matchPicker.loading} onClick={() => void searchMatchCandidates(matchPicker.item, matchPicker.assetType, matchPicker.query)} className="px-3 py-1.5 rounded-lg border border-amber-700/50 bg-amber-950/30 text-amber-200 hover:bg-amber-900/40 disabled:opacity-40 cursor-pointer">Search</button>
+            </div>
+            <div className="flex-1 min-h-[120px] overflow-y-auto flex flex-col gap-2 pr-1">
+              {matchPicker.loading && <span className="text-zinc-400 py-6 text-center">Searching Civitai…</span>}
+              {!matchPicker.loading && matchPicker.error && <span className="text-rose-300 py-3 text-center">{matchPicker.error}</span>}
+              {!matchPicker.loading && !matchPicker.error && matchPicker.searched && matchPicker.candidates.length === 0 && (
+                <span className="text-zinc-400 py-6 text-center">No candidates found. Try different words, or paste the model link.</span>
+              )}
+              {!matchPicker.loading && matchPicker.candidates.map((candidate) => (
+                <div key={`${candidate.modelId}-${candidate.versionId}`} className={`flex gap-2.5 rounded-xl border p-2 ${candidate.baseAllowed ? 'border-white/10 bg-white/[0.03]' : 'border-amber-800/40 bg-amber-950/15'}`}>
+                  {candidate.previewUrl ? (
+                    <img src={candidate.previewUrl} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-16 h-16 rounded-lg object-cover bg-black/40 shrink-0" />
+                  ) : (
+                    <div className="w-16 h-16 rounded-lg bg-black/40 shrink-0 flex items-center justify-center text-zinc-600">?</div>
+                  )}
+                  <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+                    <span className="font-semibold text-zinc-100 truncate" title={candidate.modelName}>{candidate.modelName}</span>
+                    <span className="text-[10px] text-zinc-400 truncate">{candidate.versionName || 'Version'}{candidate.baseModel ? ` · ${candidate.baseModel}` : ''}{candidate.modelType ? ` · ${candidate.modelType}` : ''}</span>
+                    <span className="flex items-center gap-1.5 text-[10px]">
+                      <span className="text-zinc-500">Name similarity {Math.min(100, Math.round((candidate.score / 130) * 100))}%</span>
+                      {!candidate.baseAllowed && <span className="text-amber-300" title="Built for a different architecture than most of your library">Different base model</span>}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1 shrink-0 justify-center">
+                    <button type="button" disabled={matchPicker.applying} onClick={() => void chooseMatchCandidate(candidate)} className="px-2.5 py-1 rounded-md border border-emerald-700/50 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-900/40 disabled:opacity-40 cursor-pointer">{matchPicker.applying ? 'Applying…' : 'Use this'}</button>
+                    <button type="button" onClick={() => window.open(candidate.url, '_blank', 'noopener,noreferrer')} className="px-2.5 py-1 rounded-md border border-white/10 text-zinc-300 hover:bg-white/10 cursor-pointer flex items-center justify-center gap-1"><ExternalLink className="w-3 h-3" /> Open</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <span className="text-[9px] text-zinc-500">Your choice is saved as the model URL for this file, so later syncs keep it. Use Clear Civitai URL Override in the card menu to undo.</span>
+          </div>
+        </div>
+      )}
+      {showCivitaiModal && (
+        <div className="fixed inset-0 z-999999 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 sc-dialog-backdrop">
+          <div className="w-[420px] bg-[#090b10] border border-white/10 rounded-2xl shadow-2xl p-5 text-xs text-zinc-200 flex flex-col gap-4 sc-dialog-card">
+            <div className="flex justify-between items-center border-b border-white/10 pb-3">
+              <span className="flex items-center gap-2 font-bold text-sm text-amber-300 font-mono">
+                <Globe className="w-4 h-4 text-amber-400" />
+                <span>Civitai Metadata Sync</span>
+              </span>
+              {!isSyncing && (
+                <button
+                  onClick={() => setShowCivitaiModal(false)}
+                  className="text-zinc-500 hover:text-white p-1 rounded-md transition"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[10px]">
+              <button type="button" onClick={async () => { const json = await civitaiService.exportLibrary(); const blob = new Blob([json], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'swarm-canvas-civitai-library.json'; a.click(); URL.revokeObjectURL(a.href); }} className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-amber-950/30 hover:border-amber-800/50 text-zinc-300">Export Library</button>
+              <label className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-amber-950/30 hover:border-amber-800/50 text-zinc-300 text-center cursor-pointer">Import Library<input type="file" accept="application/json,.json" className="hidden" onChange={async (e) => { const input = e.currentTarget; try { const file = input.files?.[0]; if (!file) return; const raw = await file.text(); const imported = await civitaiService.importLibrary(raw); await loadAssets(); refreshLibraryUi(); window.alert(`Imported ${imported} Civitai asset records.`); } catch (error) { window.alert(`Could not import library: ${error instanceof Error ? error.message : 'invalid JSON'}`); } finally { input.value = ''; } }} /></label>
+              <button type="button" onClick={async () => { if (!window.confirm('Clear the persistent Civitai metadata and preview cache? This does not delete model files.')) return; await civitaiService.clearLibrary(); civitaiService.clearCache(); await loadAssets(); refreshLibraryUi(); }} className="px-2 py-1.5 rounded-lg border border-rose-900/40 bg-rose-950/10 hover:bg-rose-950/30 text-rose-300">Clear Cache</button>
+              <button type="button" onClick={async () => { const path = libraryPath || await civitaiService.getCacheLocation(); if (path) { await navigator.clipboard.writeText(path); window.alert(`Cache path copied:
+${path}`); } else { window.alert('The persistent cache path is available only in the desktop/Tauri build.'); } }} className="px-2 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-300">Copy Cache Location</button>
+            </div>
+            <div className="p-2 rounded-xl border border-amber-900/30 bg-amber-950/10 text-[10px] font-mono text-zinc-400 leading-relaxed">
+              <div className="flex items-center justify-between gap-2"><span className="text-amber-300">Persistent library</span><span className="text-zinc-500">{libraryStats.cachedPreviews} cached previews</span></div>
+              <div className="mt-1 truncate" title={libraryPath || 'Tauri app-local Civitai cache'}>{libraryPath || 'Desktop cache: app-local data / civitai'}</div>
+            </div>
+            <label className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-2.5 cursor-pointer">
+              <div className="min-w-0"><div className="text-zinc-200 font-semibold">Automatic background Civitai scan</div><div className="text-[9px] text-zinc-500 mt-0.5">After asset refresh, resolve missing/partial metadata in the background. Manual URL overrides still run first.</div></div>
+              <input type="checkbox" checked={settings.autoCivitaiScan} onChange={(e) => updateSettings({ autoCivitaiScan: e.target.checked })} className="accent-amber-500 shrink-0" />
+            </label>
+            <label className="flex flex-col gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-2.5">
+              <span className="text-zinc-200 font-semibold">Civitai API key (optional)</span>
+              <span className="text-[9px] text-zinc-500">Raises rate limits and lets lookups reach models that require a Civitai login. Stored locally in this app only.</span>
+              <input
+                type="password"
+                autoComplete="off"
+                defaultValue={civitaiService.getApiKey()}
+                onBlur={(e) => civitaiService.setApiKey(e.target.value)}
+                placeholder="Paste key from civitai.com/user/account"
+                className="mt-1 w-full rounded-lg border border-white/10 bg-[#0d0e14] px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-amber-700/60"
+              />
+            </label>
+            <label className="flex flex-col gap-1 rounded-xl border border-white/10 bg-white/[0.03] p-2.5">
+              <span className="text-zinc-200 font-semibold">Accepted base models (optional)</span>
+              <span className="text-[9px] text-zinc-500">Comma-separated, e.g. <span className="font-mono">Anima, Illustrious, NoobAI</span>. Auto-matches whose Civitai base model is not listed are ignored. Leave empty to auto-skip SD 1.x/2.x results when your checkpoints are newer.</span>
+              <input
+                type="text"
+                defaultValue={civitaiService.getAcceptedBases()}
+                onBlur={(e) => civitaiService.setAcceptedBases(e.target.value)}
+                placeholder="Anima, Illustrious"
+                className="mt-1 w-full rounded-lg border border-white/10 bg-[#0d0e14] px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-amber-700/60"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const removed = civitaiService.clearGuessedMatches();
+                  emitToast(`Cleared ${removed} guessed match${removed === 1 ? '' : 'es'}. Manual URLs and exact matches were kept - run the sync again.`, 'info');
+                  void loadAssets(true);
+                  refreshLibraryUi();
+                }}
+                className="mt-1 self-start px-2 py-1 rounded border border-rose-900/50 bg-rose-950/20 text-rose-200 text-[10px] hover:bg-rose-900/30 cursor-pointer"
+                title="Removes all name-based matches so they are looked up again with the current rules"
+              >
+                Clear guessed matches
+              </button>
+            </label>
+            <p className="text-zinc-400 text-[11px] leading-relaxed">
+              Uses exact file hashes when available, then progressively safer Civitai searches. Missing/unmatched entries can be retried without replacing successful matches.
+            </p>
+            <div className="grid grid-cols-4 gap-1.5 text-[10px] font-mono">
+              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">TOTAL</div><div className="text-zinc-200">{libraryStats.total}</div></div>
+              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">MATCHED</div><div className="text-emerald-300">{libraryStats.matched}</div></div>
+              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">PARTIAL</div><div className="text-amber-300">{libraryStats.partial}</div></div>
+              <div className="rounded border border-white/10 bg-white/[0.03] p-1.5"><div className="text-zinc-600">ISSUES</div><div className="text-rose-300">{libraryStats.unresolved + libraryStats.failed}</div></div>
+            </div>
+            {libraryUnresolved.length > 0 && <div className="max-h-40 overflow-y-auto rounded-lg border border-rose-900/40 bg-rose-950/10 divide-y divide-white/5">{libraryUnresolved.slice(0, 12).map((entry) => <div key={`${entry.type}:${entry.filename}`} className="flex items-center gap-2 px-2.5 py-2 hover:bg-white/[0.03]"><button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setShowCivitaiModal(false); setTab(entry.type as any); setSearch(entry.filename.split('/').pop() || entry.filename); setFilterMode('unresolved'); }}><div className="text-[10px] text-zinc-200 truncate">{entry.filename}</div><div className="text-[9px] text-rose-300/80 truncate">{entry.failureReason || entry.status}</div></button><button type="button" className="shrink-0 px-2 py-1 rounded border border-amber-900/50 bg-amber-950/20 text-amber-200 text-[9px]" onClick={async () => { const current = (useAppStore.getState() as any)[entry.type === 'model' ? 'modelsList' : entry.type === 'lora' ? 'lorasList' : 'embeddingsList']?.find((candidate: ModelItem) => candidate.name === entry.filename) as ModelItem | undefined; const url = window.prompt(`Paste the main Civitai model URL for ${entry.filename}:`, entry.civitaiUrl || 'https://civitai.com/models/'); if (!current || !url?.trim() || url.trim().endsWith('/')) return; await setCivitaiUrl(entry.type, entry.filename, url.trim()); await refreshCivitaiItem(entry.type, entry.filename); refreshLibraryUi(); }}>Resolve</button></div>)}</div>}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] text-zinc-400 uppercase font-mono tracking-wider">Target Catalog Collection</label>
+              <select
+                disabled={isSyncing}
+                value={selectedCivitaiCategory}
+                onChange={(e) => setSelectedCivitaiCategory(e.target.value as any)}
+                className="w-full bg-[#12141c] border border-white/10 rounded-xl p-2 text-zinc-200 outline-none font-mono text-xs focus:border-cyan-400 cursor-pointer"
+              >
+                <option value="all">All Catalogs ({modelsList.length + lorasList.length + embeddingsList.length} items)</option>
+                <option value="models">Checkpoints Only ({modelsList.length} items)</option>
+                <option value="loras">LoRAs Only ({lorasList.length} items)</option>
+                <option value="embeddings">Embeddings Only ({embeddingsList.length} items)</option>
+              </select>
+            </div>
+            {/* Active Sync Progress Window */}
+            {isSyncing && (
+              <div className="flex flex-col gap-2 p-3 bg-black/60 border border-cyan-500/30 rounded-xl">
+                <div className="flex justify-between items-center text-[10px] font-mono">
+                  <span className="text-cyan-300 font-semibold truncate max-w-[240px]">
+                    {syncProgress?.name ? syncProgress.name.split('/').pop() : 'Connecting to API...'}
+                  </span>
+                  <span className="text-zinc-400 font-bold">
+                    {syncProgress ? `${syncProgress.current} / ${syncProgress.total}` : '0%'}
+                  </span>
+                </div>
+                <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-blue-400/75 h-full transition-all duration-150 shadow-[0_0_10px_rgba(120,166,216,0.20)]"
+                    style={{
+                      width: syncProgress
+                        ? `${Math.round((syncProgress.current / syncProgress.total) * 100)}%`
+                        : '5%'
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-white/10">
+              <button
+                disabled={isSyncing}
+                onClick={() => void handleFetchMissingOnly()}
+                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-amber-700/50 bg-amber-950/25 text-amber-200 hover:bg-amber-900/40 disabled:opacity-50 transition cursor-pointer text-[11px]"
+                title="Only looks up assets that have no Civitai metadata at all. Partial results, manual links and anything already matched are left alone."
+              >
+                Fetch missing only
+              </button>
+              <button
+                disabled={isSyncing}
+                onClick={() => void handleCheckUpdatesFromModal()}
+                className="flex-1 min-w-[150px] px-3 py-2 rounded-xl border border-sky-700/50 bg-sky-950/25 text-sky-200 hover:bg-sky-900/40 disabled:opacity-50 transition cursor-pointer text-[11px]"
+                title="Checks Civitai for a newer version (same base model) of every asset that already has metadata. It does not download or change anything."
+              >
+                Check for updates
+              </button>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                disabled={isSyncing}
+                onClick={() => setShowCivitaiModal(false)}
+                className="px-4 py-2 bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white rounded-xl transition cursor-pointer"
+              >
+                Close
+              </button>
+              <button
+                disabled={isSyncing}
+                onClick={handleStartCivitaiSync}
+                className="sc-generate-button px-5 py-2 rounded-xl disabled:opacity-50"
+              >
+                {isSyncing ? 'Fetching...' : 'Sync / Retry Missing'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 
@@ -11955,465 +11632,240 @@ const ControlNetPanel: React.FC<IDockviewPanelProps> = () => {
 
 
 const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
-
-  const { aDetailerUnits, updateADetailer, settings, updateSettings, yoloModelsList } = useAppStore(useShallow((s) => ({
-
-    aDetailerUnits: s.aDetailerUnits, updateADetailer: s.updateADetailer, settings: s.settings, updateSettings: s.updateSettings, yoloModelsList: s.yoloModelsList,
-
+  const { aDetailerUnits, updateADetailer, addADetailerPass, removeADetailerPass, settings, updateSettings, yoloModelsList } = useAppStore(useShallow((s) => ({
+    aDetailerUnits: s.aDetailerUnits, updateADetailer: s.updateADetailer, addADetailerPass: s.addADetailerPass, removeADetailerPass: s.removeADetailerPass, settings: s.settings, updateSettings: s.updateSettings, yoloModelsList: s.yoloModelsList,
   })));
-
   const [activeId, setActiveId] = useState('1');
-
-
-
   const unit = aDetailerUnits.find((u) => u.id === activeId) || aDetailerUnits[0];
-
-
-
   return (
-
     <div
-
       className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none"
-
       style={{ zoom: `${settings.sectionScales.adetailer}%` }}
-
     >
-
       {/* Pass tabs */}
-
       <div className="flex gap-1 border-b border-[#252a35] pb-2">
-
         {aDetailerUnits.map((u) => (
-
           <button
-
             key={u.id}
-
             onClick={() => setActiveId(u.id)}
-
             className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 cursor-pointer ${
-
               activeId === u.id ? 'bg-amber-700/70 text-amber-50 font-medium' : 'bg-[#181a20] text-gray-400 hover:text-gray-200'
-
             }`}
-
           >
-
             <span>Pass {u.id}</span>
-
             {u.enabled && <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />}
-
           </button>
-
         ))}
-
+        <button
+          type="button"
+          onClick={() => setActiveId(addADetailerPass())}
+          className="px-2 py-1 rounded text-xs bg-[#181a20] text-gray-400 hover:text-amber-200 hover:bg-amber-900/30 border border-dashed border-[#2b2f3a] cursor-pointer flex items-center"
+          title="Add another ADetailer pass (copies the latest pass's settings, disabled)"
+          aria-label="Add ADetailer pass"
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+        {aDetailerUnits.length > 1 && (
+          <button
+            type="button"
+            onClick={() => { if (window.confirm(`Remove Pass ${unit.id}?`)) removeADetailerPass(unit.id); }}
+            className="ml-auto px-2 py-1 rounded text-[10px] text-gray-500 hover:text-rose-300 hover:bg-rose-950/30 cursor-pointer flex items-center gap-1"
+            title={`Remove Pass ${unit.id}`}
+          >
+            <Trash2 className="w-3 h-3" /> Remove
+          </button>
+        )}
       </div>
-
-
-
       {/* Enable toggle */}
-
       <div className="flex justify-between items-center bg-[#181a20] p-2 rounded border border-[#2b2f3a]">
-
         <label className="font-semibold text-gray-200 flex items-center gap-1.5 cursor-pointer">
-
           <Sparkle className="w-3.5 h-3.5 text-amber-400" /> Enable Pass {unit.id}
-
         </label>
-
         <input
-
           type="checkbox"
-
           checked={unit.enabled}
-
           onChange={(e) => updateADetailer(unit.id, { enabled: e.target.checked })}
-
           className="accent-indigo-500 w-4 h-4 cursor-pointer"
-
         />
-
       </div>
-
-
-
       {/* Model selector */}
-
       <div>
-
         <label className="text-gray-400 block mb-1">Model Target (YOLO)</label>
-
         <select
-
           value={unit.model}
-
           onChange={(e) => updateADetailer(unit.id, { model: e.target.value })}
-
           className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1.5 text-gray-200 outline-none font-mono"
-
         >
-
           {yoloModelsList.map((m) => (
-
             <option key={m} value={m}>{m}</option>
-
           ))}
-
         </select>
-
       </div>
-
-
-
       {/* Per-Pass Positive and Negative Prompt Textareas */}
-
       <div className="flex flex-col gap-2 border-t border-[#252a35] pt-2">
-
         <div>
-
           <label className="text-[11px] font-medium text-indigo-300 flex items-center justify-between mb-1">
-
             <span>Pass {unit.id} Positive Prompt Override</span>
-
             <span className="text-[10px] text-gray-500">Appends to pass</span>
-
           </label>
-
           <textarea
-
             rows={2}
-
             value={unit.prompt || ''}
-
             onChange={(e) => updateADetailer(unit.id, { prompt: e.target.value })}
-
             placeholder="e.g., highly detailed face, realistic eyes, soft smile"
-
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-2 text-xs text-gray-200 placeholder:text-gray-600 outline-none focus:border-indigo-500 font-mono resize-none"
-
           />
-
         </div>
-
-
-
         <div>
-
           <label className="text-[11px] font-medium text-rose-300 flex items-center justify-between mb-1">
-
             <span>Pass {unit.id} Negative Prompt Override</span>
-
             <span className="text-[10px] text-gray-500">Optional</span>
-
           </label>
-
           <textarea
-
             rows={1}
-
             value={unit.negativePrompt || ''}
-
             onChange={(e) => updateADetailer(unit.id, { negativePrompt: e.target.value })}
-
             placeholder="e.g., bad eyes, blurry, deformed pupils"
-
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-2 text-xs text-gray-400 placeholder:text-gray-600 outline-none focus:border-rose-500 font-mono resize-none"
-
           />
-
         </div>
-
       </div>
-
-
-
       {/* Save Before / After Comparison Feature */}
-
       <div className="flex justify-between items-center bg-[#181a20]/60 p-2 rounded border border-[#252a35]">
-
         <div className="flex flex-col">
-
           <span className="text-gray-200 font-medium">Keep Pre-ADetailer Image</span>
-
           <span className="text-[10px] text-gray-400">Saves both & auto-opens Split View slider</span>
-
         </div>
-
         <input
-
           type="checkbox"
-
           checked={settings.saveBeforeAfterADetailer}
-
           onChange={(e) => updateSettings({ saveBeforeAfterADetailer: e.target.checked })}
-
           className="accent-indigo-500 w-4 h-4 cursor-pointer"
-
         />
-
       </div>
-
-
-
       {/* Sliders */}
-
       <div>
-
         <label className="text-gray-400 flex justify-between">
-
           <span>Confidence Threshold</span>
-
           <span className="font-mono text-indigo-400">{unit.confidence}</span>
-
         </label>
-
         <input
-
           type="range"
-
           min="0.05"
-
           max="0.95"
-
           step="0.05"
-
           value={unit.confidence}
-
           onChange={(e) => updateADetailer(unit.id, { confidence: Number(e.target.value) })}
-
           className="w-full mt-1 accent-indigo-500"
-
         />
-
       </div>
-
-
-
       <div>
-
         <label className="text-gray-400 flex justify-between">
-
           <span>Denoising Strength</span>
-
           <span className="font-mono text-indigo-400">{unit.denoiseStrength}</span>
-
         </label>
-
         <input
-
           type="range"
-
           min="0.1"
-
           max="0.8"
-
           step="0.05"
-
           value={unit.denoiseStrength}
-
           onChange={(e) => updateADetailer(unit.id, { denoiseStrength: Number(e.target.value) })}
-
           className="w-full mt-1 accent-indigo-500"
-
         />
-
       </div>
-
-
-
       <div>
-
         <label className="text-gray-400 flex justify-between">
-
           <span>Inpaint Steps</span>
-
           <span className="font-mono text-indigo-400">{unit.steps ?? 16}</span>
-
         </label>
-
         <input
-
           type="range"
-
           min="5"
-
           max="50"
-
           step="1"
-
           value={unit.steps ?? 16}
-
           onChange={(e) => updateADetailer(unit.id, { steps: Number(e.target.value) })}
-
           className="w-full mt-1 accent-indigo-500"
-
         />
-
       </div>
-
-
-
       {/* Mask Settings */}
-
       <div className="grid grid-cols-2 gap-2">
-
         <div>
-
           <label className="text-gray-400 flex justify-between">
-
             <span>Mask Grow (px)</span>
-
             <span className="font-mono text-indigo-400">{unit.maskGrow ?? 4}</span>
-
           </label>
-
           <input
-
             type="number"
-
             min="0"
-
             max="64"
-
             value={unit.maskGrow ?? 4}
-
             onChange={(e) => updateADetailer(unit.id, { maskGrow: Number(e.target.value) })}
-
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1 text-gray-200 font-mono mt-1"
-
           />
-
         </div>
-
         <div>
-
           <label className="text-gray-400 flex justify-between">
-
             <span>Mask Blur (px)</span>
-
             <span className="font-mono text-indigo-400">{unit.maskBlur ?? 4}</span>
-
           </label>
-
           <input
-
             type="number"
-
             min="0"
-
             max="64"
-
             value={unit.maskBlur ?? 4}
-
             onChange={(e) => updateADetailer(unit.id, { maskBlur: Number(e.target.value) })}
-
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1 text-gray-200 font-mono mt-1"
-
           />
-
         </div>
-
       </div>
-
-
-
       <div>
-
         <label className="text-gray-400 flex justify-between">
-
           <span>Context Oversize (%)</span>
-
           <span className="font-mono text-indigo-400">{unit.maskOversize ?? 10}%</span>
-
         </label>
-
         <input
-
           type="range"
-
           min="0"
-
           max="50"
-
           step="5"
-
           value={unit.maskOversize ?? 10}
-
           onChange={(e) => updateADetailer(unit.id, { maskOversize: Number(e.target.value) })}
-
           className="w-full mt-1 accent-indigo-500"
-
         />
-
       </div>
-
-
-
       {/* Detection Sorting Order */}
-
       <div>
-
         <label className="text-gray-400 block mb-1">Multi-Detection Order</label>
-
         <select
-
           value={unit.sortOrder ?? 'largest-smallest'}
-
           onChange={(e) => updateADetailer(unit.id, { sortOrder: e.target.value as any })}
-
           className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1.5 text-gray-200 outline-none font-mono"
-
         >
-
           <option value="largest-smallest">Largest to Smallest</option>
-
           <option value="smallest-largest">Smallest to Largest</option>
-
           <option value="left-right">Left to Right</option>
-
           <option value="right-left">Right to Left</option>
-
           <option value="top-bottom">Top to Bottom</option>
-
           <option value="bottom-top">Bottom to Top</option>
-
         </select>
-
       </div>
-
-
-
       {/* Mask Debug Export Toggle */}
-
       <div className="flex justify-between items-center bg-[#181a20]/60 p-2 rounded border border-[#252a35]">
-
         <div className="flex flex-col">
-
           <span className="text-gray-200 font-medium">Save Debug Mask</span>
-
           <span className="text-[10px] text-gray-400">Outputs generated binary segment mask to history</span>
-
         </div>
-
         <input
-
           type="checkbox"
-
           checked={unit.saveMask ?? false}
-
           onChange={(e) => updateADetailer(unit.id, { saveMask: e.target.checked })}
-
           className="accent-indigo-500 w-4 h-4 cursor-pointer"
-
         />
-
       </div>
-
     </div>
-
   );
-
 };
 
 
@@ -13297,21 +12749,32 @@ if (typeof window !== 'undefined' && !(window as any).__swarm_perf) {
 
 
 const THEME_LABELS: Record<string, string> = {
-  obsidian: 'Obsidian', arctic: 'Arctic', paper: 'Paper', terminal: 'Terminal', midnight: 'Midnight', forest: 'Forest',
+  hive: 'Hive', tower: 'Tower', genko: 'Genkō', obsidian: 'Obsidian', arctic: 'Arctic', paper: 'Paper', terminal: 'Terminal', midnight: 'Midnight', forest: 'Forest',
   clay: 'Clay', mono: 'Monochrome', contrast: 'High Contrast', nord: 'Nord', dracula: 'Dracula', solarized: 'Solarized',
   rose: 'Rose', coffee: 'Coffeehouse', matrix: 'Matrix', sunset: 'Sunset',
 };
 
+function AdvancedRestoreOverlay() {
+  return <div role="status" aria-live="polite" className="fixed inset-0 z-[2147483000] flex flex-col items-center justify-center gap-3 bg-[var(--sc-bg)] text-[var(--sc-text)]">
+    <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]"><RefreshCw className="h-5 w-5 animate-spin text-[var(--sc-gold-strong)]" /></div>
+    <div className="text-sm font-semibold">Restoring Advanced UI</div>
+    <div className="text-[11px] text-[var(--sc-text-dim)]">Rebuilding your saved workspace layout…</div>
+  </div>;
+}
+
 export const Workspace: React.FC = () => {
 
   const {
-    settings, updateSettings, setSectionScale, setPrompt, setNegativePrompt, activeContextMenu,
-    setActiveContextMenu, isGenerating, isConnected, queue, activeJob, modelsList, cancelGeneration,
+    settings, updateSettings, setSectionScale, prompt, negativePrompt, setPrompt, setNegativePrompt,
+    model, setModel, width, height, steps, cfgScale, seed, batchCount, setParams,
+    activeContextMenu, setActiveContextMenu, isGenerating, isConnected, queue, activeJob, modelsList, cancelGeneration,
     enqueueAndProcess, queueCurrentGeneration, recoveredQueueSize, dismissRecoveredQueue,
     startQueueProcessing, clearQueue, history, restoreHistory,
   } = useAppStore(useShallow((s) => ({
-    settings: s.settings, updateSettings: s.updateSettings, setSectionScale: s.setSectionScale, setPrompt: s.setPrompt,
-    setNegativePrompt: s.setNegativePrompt, activeContextMenu: s.activeContextMenu, setActiveContextMenu: s.setActiveContextMenu,
+    settings: s.settings, updateSettings: s.updateSettings, setSectionScale: s.setSectionScale,
+    prompt: s.prompt, negativePrompt: s.negativePrompt, setPrompt: s.setPrompt, setNegativePrompt: s.setNegativePrompt,
+    model: s.model, setModel: s.setModel, width: s.width, height: s.height, steps: s.steps, cfgScale: s.cfgScale, seed: s.seed, batchCount: s.batchCount, setParams: s.setParams,
+    activeContextMenu: s.activeContextMenu, setActiveContextMenu: s.setActiveContextMenu,
     isGenerating: s.isGenerating, isConnected: s.isConnected, queue: s.queue, activeJob: s.activeJob, modelsList: s.modelsList,
     cancelGeneration: s.cancelGeneration, enqueueAndProcess: s.enqueueAndProcess, queueCurrentGeneration: s.queueCurrentGeneration,
     recoveredQueueSize: s.recoveredQueueSize, dismissRecoveredQueue: s.dismissRecoveredQueue,
@@ -13350,7 +12813,7 @@ export const Workspace: React.FC = () => {
   }, [history, restoreHistory]);
 
 
-  const resolvedTheme = settings.uiTheme === 'cyber_black' ? 'obsidian' : settings.uiTheme === 'classic' ? 'paper' : settings.uiTheme;
+  const resolvedTheme = settings.uiTheme === 'cyber_black' ? 'hive' : settings.uiTheme === 'classic' ? 'paper' : settings.uiTheme === 'simplified' ? 'hive' : settings.uiTheme;
   const fontScale = Math.min(140, Math.max(80, Number(settings.fontScale) || 100));
   const themeLabel = THEME_LABELS[resolvedTheme] || resolvedTheme;
 
@@ -13656,6 +13119,62 @@ export const Workspace: React.FC = () => {
   const [activeScaleSection, setActiveScaleSection] = useState<keyof AppSettings['sectionScales']>('pills');
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useLocalState<boolean>('swarm_sidebar_collapsed_v2', false);
+  const [isSimplifiedUi, setIsSimplifiedUi] = useLocalState<boolean>('swarm_simplified_workspace_mode_v1', false);
+  const [showAdvancedRestore, setShowAdvancedRestore] = useState(false);
+  const advancedRestoreTimerRef = useRef<number | null>(null);
+  const advancedRestoreFrameRef = useRef<number | null>(null);
+  const switchToAdvancedUi = () => {
+    if (advancedRestoreTimerRef.current !== null) window.clearTimeout(advancedRestoreTimerRef.current);
+    if (advancedRestoreFrameRef.current !== null) window.cancelAnimationFrame(advancedRestoreFrameRef.current);
+    // Paint the cover over Simplified UI first, then swap in Dockview underneath it.
+    setShowAdvancedRestore(true);
+    advancedRestoreFrameRef.current = window.requestAnimationFrame(() => {
+      advancedRestoreFrameRef.current = null;
+      setIsSimplifiedUi(false);
+    });
+    advancedRestoreTimerRef.current = window.setTimeout(() => {
+      setShowAdvancedRestore(false);
+      advancedRestoreTimerRef.current = null;
+    }, 5000);
+  };
+  useEffect(() => () => {
+    if (advancedRestoreTimerRef.current !== null) window.clearTimeout(advancedRestoreTimerRef.current);
+    if (advancedRestoreFrameRef.current !== null) window.cancelAnimationFrame(advancedRestoreFrameRef.current);
+  }, []);
+  const [simplifiedAuxPanel, setSimplifiedAuxPanel] = useState<'params' | 'history'>('params');
+  const [simplifiedPanelWidths, setSimplifiedPanelWidths] = useLocalState<[number, number, number]>('swarm_simplified_panel_widths_v1', [28, 45, 27]);
+  const simplifiedLayoutRef = useRef<HTMLDivElement>(null);
+
+  const startSimplifiedPanelResize = (event: React.MouseEvent<HTMLDivElement>, divider: 'left' | 'right') => {
+    event.preventDefault();
+    event.stopPropagation();
+    const layout = simplifiedLayoutRef.current;
+    if (!layout) return;
+    const rect = layout.getBoundingClientRect();
+    const availableWidth = Math.max(1, rect.width - 32);
+    const [startLeft, , startRight] = simplifiedPanelWidths;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (moveEvent: MouseEvent) => {
+      const offsetX = moveEvent.clientX - rect.left - 8 - (divider === 'right' ? 8 : 0);
+      const positionPct = Math.max(0, Math.min(100, (offsetX / availableWidth) * 100));
+      if (divider === 'left') {
+        const left = Math.round(Math.max(22, Math.min(100 - startRight - 26, positionPct)));
+        setSimplifiedPanelWidths([left, 100 - left - startRight, startRight]);
+      } else {
+        const right = Math.round(Math.max(22, Math.min(100 - startLeft - 26, 100 - positionPct)));
+        setSimplifiedPanelWidths([startLeft, 100 - startLeft - right, right]);
+      }
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const savedSidebarWidth = useRef(320);
 
@@ -13755,7 +13274,11 @@ export const Workspace: React.FC = () => {
 
     setDockApi(event.api);
 
-
+    const clearAdvancedRestore = () => {
+      if (advancedRestoreTimerRef.current !== null) window.clearTimeout(advancedRestoreTimerRef.current);
+      advancedRestoreTimerRef.current = null;
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => setShowAdvancedRestore(false)));
+    };
 
     const savedLayout = localStorage.getItem('swarm_dockview_layout');
 
@@ -13764,7 +13287,7 @@ export const Workspace: React.FC = () => {
       try {
 
         event.api.fromJSON(JSON.parse(savedLayout));
-
+        clearAdvancedRestore();
         return;
 
       } catch (e) {
@@ -13778,6 +13301,7 @@ export const Workspace: React.FC = () => {
 
 
     applyLayoutPreset(settings.activePreset, event.api);
+    clearAdvancedRestore();
 
   };
 
@@ -14094,6 +13618,90 @@ export const Workspace: React.FC = () => {
 
 
 
+  const copySimplifiedPrompt = async (label: string, value: string) => {
+    try { await navigator.clipboard.writeText(value); emitToast(`${label} copied`, 'success'); }
+    catch { emitToast('Clipboard access was unavailable', 'warning'); }
+  };
+
+  const renderSimplifiedPromptEditor = () => (
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
+      <PanelErrorBoundary name="Positive prompt"><SimplifiedPromptPillEditor title="Positive prompt" tone="positive" value={prompt} onChange={setPrompt} onCopy={() => void copySimplifiedPrompt('Positive prompt', prompt)} /></PanelErrorBoundary>
+      <PanelErrorBoundary name="Negative prompt"><SimplifiedPromptPillEditor title="Negative prompt" tone="negative" value={negativePrompt} onChange={setNegativePrompt} onCopy={() => void copySimplifiedPrompt('Negative prompt', negativePrompt)} /></PanelErrorBoundary>
+      <div className="flex flex-wrap gap-2 border-t border-[var(--sc-border-soft)] pt-3"><button type="button" onClick={switchToAdvancedUi} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 py-2 text-[11px] font-medium text-[var(--sc-text)] hover:bg-white/10">Advanced Prompt Pills</button><button type="button" onClick={() => void openAnimaPromptBuilderPopup()} className="rounded-lg border border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)] px-3 py-2 text-[11px] font-medium text-[var(--sc-gold-strong)] hover:bg-[var(--sc-gold-soft)]"><Wand2 className="mr-1 inline h-3.5 w-3.5" />Anima Prompt Builder</button></div>
+    </div>
+  );
+
+  const renderSimplifiedQuickSettings = () => {
+    const dimension = (value: number) => Math.max(64, Math.min(4096, Math.round((Number(value) || 64) / 8) * 8));
+    const fieldClass = 'w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] px-2.5 py-2 text-[13px] text-[var(--sc-text)] outline-none focus:border-[var(--sc-theme-border)]';
+    return <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto p-3">
+      <div><label className="mb-1 block text-xs font-semibold text-[var(--sc-text-secondary)]">Checkpoint / model</label><select value={model} onChange={(event) => setModel(event.target.value)} className={fieldClass}><option value="">Select a model…</option>{model && !modelsList.some((item: any) => item.name === model) && <option value={model}>{model}</option>}{modelsList.map((item: any) => <option key={item.name} value={item.name}>{item.name}</option>)}</select></div>
+      <div><div className="mb-2 flex items-center justify-between"><span className="text-xs font-semibold text-[var(--sc-text-secondary)]">Image size</span><span className="text-[11px] tabular-nums text-[var(--sc-text-dim)]">{width} × {height}</span></div><div className="grid grid-cols-3 gap-1.5"><button type="button" onClick={() => setParams({ width: 832, height: 1216 })} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-1.5 py-2 text-[11px] hover:border-[var(--sc-theme-border)]">Portrait</button><button type="button" onClick={() => setParams({ width: 1024, height: 1024 })} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-1.5 py-2 text-[11px] hover:border-[var(--sc-theme-border)]">Square</button><button type="button" onClick={() => setParams({ width: 1216, height: 832 })} className="rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-1.5 py-2 text-[11px] hover:border-[var(--sc-theme-border)]">Landscape</button></div><div className="mt-2 grid grid-cols-2 gap-2"><label className="text-[11px] text-[var(--sc-text-dim)]">Width<input type="number" min={64} max={4096} step={8} value={width} onChange={(event) => setParams({ width: dimension(Number(event.target.value)) })} className={fieldClass + ' mt-1'} /></label><label className="text-[11px] text-[var(--sc-text-dim)]">Height<input type="number" min={64} max={4096} step={8} value={height} onChange={(event) => setParams({ height: dimension(Number(event.target.value)) })} className={fieldClass + ' mt-1'} /></label></div></div>
+      <div className="grid grid-cols-2 gap-2"><label className="text-[11px] text-[var(--sc-text-dim)]">Steps<input type="number" min={1} max={150} value={steps} onChange={(event) => setParams({ steps: Math.max(1, Math.min(150, Math.round(Number(event.target.value) || 1))) })} className={fieldClass + ' mt-1'} /></label><label className="text-[11px] text-[var(--sc-text-dim)]">CFG scale<input type="number" min={0} max={50} step={0.5} value={cfgScale} onChange={(event) => setParams({ cfgScale: Math.max(0, Math.min(50, Number(event.target.value) || 0)) })} className={fieldClass + ' mt-1'} /></label></div>
+      <div className="grid grid-cols-2 gap-2"><label className="text-[11px] text-[var(--sc-text-dim)]">Seed <span className="text-[10px]">(−1 = random)</span><input type="number" min={-1} max={2147483647} value={seed} onChange={(event) => { const raw = event.target.value; const parsed = raw.trim() === "" ? -1 : Number(raw); setParams({ seed: Math.max(-1, Math.min(2147483647, Number.isFinite(parsed) ? Math.round(parsed) : -1)) }); }} className={fieldClass + ' mt-1'} /></label><label className="text-[11px] text-[var(--sc-text-dim)]">Batch count<input type="number" min={1} max={100} value={batchCount} onChange={(event) => setParams({ batchCount: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} className={fieldClass + ' mt-1'} /></label></div>
+      <div className="mt-auto rounded-lg border border-[var(--sc-border-soft)] bg-[var(--sc-surface-2)] p-3 text-[11px] leading-5 text-[var(--sc-text-dim)]">Quick settings intentionally show only the controls needed for common generations. Switch to Advanced UI for samplers, schedulers, VAE, text encoders, ControlNet, LoRA and the full settings panels.</div>
+      <button type="button" onClick={switchToAdvancedUi} className="w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-3 py-2 text-[11px] font-medium text-[var(--sc-text)] hover:bg-white/10">Open Advanced Parameters</button>
+    </div>;
+  };
+
+  const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(() => (typeof window === 'undefined' || !window.matchMedia ? true : window.matchMedia('(min-width: 768px)').matches));
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const query = window.matchMedia('(min-width: 768px)');
+    const onChange = () => setIsDesktopViewport(query.matches);
+    onChange();
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  const isStudioLayout = resolvedTheme === 'hive' || resolvedTheme === 'tower' || resolvedTheme === 'genko';
+  const StudioShell = resolvedTheme === 'tower' ? TowerStudio : resolvedTheme === 'genko' ? GenkoStudio : HiveStudio;
+  // The studio layouts (Hive, Tower, Genko) have no Dockview. Drop the old handle so dock-only actions (layout presets, adding panels,
+  // the docked generation viewer) do nothing instead of touching an instance that no longer exists.
+  useEffect(() => {
+    if (isStudioLayout) setDockApi(null);
+  }, [isStudioLayout]);
+  if (isSimplifiedUi) {
+    const panelProps = { api: {} as any, containerApi: {} as any, params: {} };
+    return (
+      <div data-ui-theme={resolvedTheme} style={{ '--sc-font-scale': fontScale / 100 } as React.CSSProperties} className="sc-workspace-shell w-full h-full min-h-0 flex flex-col overflow-hidden font-sans">
+        {showAdvancedRestore && createPortal(<AdvancedRestoreOverlay />, document.body)}
+        <header className="sc-workspace-topbar sc-themed-topbar flex min-h-12 shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
+          <div className="flex min-w-0 items-center gap-3">
+            <BrandMark size={32} busy={isGenerating} />
+            <div className="min-w-0"><div className="text-sm font-semibold">SwarmCanvas <span className="ml-1 rounded-md bg-white/5 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">Simplified UI</span></div><div className="text-[10px] text-zinc-500">Prompts · Canvas · Parameters</div></div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <div className={`hidden sm:flex items-center gap-1.5 text-[11px] ${isConnected ? 'text-emerald-300' : 'text-rose-300'}`}><span className={`h-1.5 w-1.5 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-rose-400'}`} />{isConnected ? 'Connected' : 'Offline'}</div>
+            <span className="hidden lg:inline text-[11px] text-zinc-500">{queuedCount} queued · {modelCount} models</span>
+            <button type="button" onClick={switchToAdvancedUi} className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2 text-[11px] font-medium text-zinc-300 hover:bg-white/10">Advanced UI</button>
+            <button type="button" onClick={isGenerating ? cancelGeneration : () => void enqueueAndProcess()} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-semibold text-white ${isGenerating ? 'bg-rose-700 hover:bg-rose-600' : 'bg-amber-700 hover:bg-amber-600'}`}><Wand2 className="h-3.5 w-3.5" />{isGenerating ? 'Stop' : 'Generate'}</button>
+          </div>
+        </header>
+
+        <div ref={simplifiedLayoutRef} style={{ gridTemplateColumns: `minmax(240px, ${simplifiedPanelWidths[0]}fr) 8px minmax(300px, ${simplifiedPanelWidths[1]}fr) 8px minmax(240px, ${simplifiedPanelWidths[2]}fr)` }} className="hidden md:grid min-h-0 flex-1 gap-0 overflow-hidden bg-[var(--sc-bg)] p-2">
+          <section className="min-h-0 overflow-hidden rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><div className="flex h-9 items-center justify-between border-b border-[var(--sc-border-soft)] px-3"><span className="text-xs font-semibold">Prompts</span><span className="text-[10px] text-[var(--sc-text-dim)]">Edit tags and prompt text</span></div><div className="h-[calc(100%-2.25rem)] min-h-0 overflow-hidden">{renderSimplifiedPromptEditor()}</div></section>
+          <div role="separator" aria-orientation="vertical" aria-label="Resize prompts panel" title="Drag to resize the prompts panel" onMouseDown={(event) => startSimplifiedPanelResize(event, 'left')} className="group flex min-w-0 cursor-col-resize items-center justify-center"><div className="h-14 w-1 rounded-full bg-[var(--sc-border)] transition-colors group-hover:bg-[var(--sc-gold-strong)]" /></div>
+          <section className="min-h-0 overflow-hidden rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)]"><div className="flex h-9 items-center justify-between border-b border-[var(--sc-border-soft)] px-3"><span className="text-xs font-semibold">Canvas</span><span className="text-[10px] text-[var(--sc-text-dim)]">Preview and inspect output</span></div><div className="h-[calc(100%-2.25rem)] min-h-0 overflow-hidden"><PreviewPanel {...panelProps} /></div></section>
+          <div role="separator" aria-orientation="vertical" aria-label="Resize settings panel" title="Drag to resize the canvas and settings panels" onMouseDown={(event) => startSimplifiedPanelResize(event, 'right')} className="group flex min-w-0 cursor-col-resize items-center justify-center"><div className="h-14 w-1 rounded-full bg-[var(--sc-border)] transition-colors group-hover:bg-[var(--sc-gold-strong)]" /></div>
+          <section className="min-h-0 overflow-hidden rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><div className="flex h-9 items-center gap-1 border-b border-[var(--sc-border-soft)] px-2"><button type="button" onClick={() => setSimplifiedAuxPanel('params')} className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${simplifiedAuxPanel === 'params' ? 'bg-[var(--sc-gold-soft)] text-[var(--sc-gold-strong)]' : 'text-[var(--sc-text-muted)] hover:bg-white/5'}`}>Parameters</button><button type="button" onClick={() => setSimplifiedAuxPanel('history')} className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${simplifiedAuxPanel === 'history' ? 'bg-[var(--sc-gold-soft)] text-[var(--sc-gold-strong)]' : 'text-[var(--sc-text-muted)] hover:bg-white/5'}`}>History</button></div><div className="h-[calc(100%-2.25rem)] min-h-0 overflow-y-auto">{simplifiedAuxPanel === 'params' ? renderSimplifiedQuickSettings() : <HistoryPanel {...panelProps} />}</div></section>
+        </div>
+
+        <div className="md:hidden min-h-0 flex-1 overflow-hidden pb-14">
+          {mobileActiveTab === 'canvas' && <PreviewPanel {...panelProps} />}
+          {mobileActiveTab === 'prompts' && renderSimplifiedPromptEditor()}
+          {mobileActiveTab === 'params' && renderSimplifiedQuickSettings()}
+          {mobileActiveTab === 'history' && <HistoryPanel {...panelProps} />}
+        </div>
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex h-12 items-center justify-around border-t border-white/10 bg-black/90 text-[11px] text-zinc-400 backdrop-blur">
+          <button type="button" onClick={() => setMobileActiveTab('prompts')} className={mobileActiveTab === 'prompts' ? 'text-amber-300' : ''}>Prompts</button>
+          <button type="button" onClick={() => setMobileActiveTab('canvas')} className={mobileActiveTab === 'canvas' ? 'text-amber-300' : ''}>Canvas</button>
+          <button type="button" onClick={() => setMobileActiveTab('params')} className={mobileActiveTab === 'params' ? 'text-amber-300' : ''}>Quick Settings</button>
+          <button type="button" onClick={() => setMobileActiveTab('history')} className={mobileActiveTab === 'history' ? 'text-amber-300' : ''}>History</button>
+        </nav>
+      </div>
+    );
+  }
+
   return (
 
     <div
@@ -14101,8 +13709,9 @@ export const Workspace: React.FC = () => {
       style={{ '--sc-font-scale': fontScale / 100 } as React.CSSProperties}
       className="sc-workspace-shell w-full h-full min-h-0 flex flex-col overflow-hidden font-sans"
     >
+      {showAdvancedRestore && createPortal(<AdvancedRestoreOverlay />, document.body)}
 
-      {!isTopBarCollapsed ? (
+      {isStudioLayout ? null : !isTopBarCollapsed ? (
 
         <div className={`sc-workspace-topbar h-10 px-3 flex items-center justify-between select-none shrink-0 z-30 border-b ${
 
@@ -14136,11 +13745,7 @@ export const Workspace: React.FC = () => {
 
 
 
-            <span className="font-extrabold text-sm tracking-tight text-transparent bg-clip-text bg-linear-to-r from-amber-200 via-amber-400 to-yellow-700">
-
-              SwarmCanvas
-
-            </span>
+            <BrandLockup busy={isGenerating} />
 
 
 
@@ -14291,6 +13896,8 @@ export const Workspace: React.FC = () => {
 
 
 
+            <button type="button" onClick={() => setIsSimplifiedUi(true)} className="sc-action-button sc-action-info rounded-xl text-[10px] font-mono" title="Switch to the simplified workspace layout"><LayoutGrid className="w-3.5 h-3.5 text-amber-300" /> Simplified UI</button>
+
             <div className="relative hidden sm:block">
               <InfoPopover content="Choose a visual theme. Obsidian stays the default; alternate themes change surfaces, contrast and accent language." side="bottom" className="sc-popover-button-trigger">
                 <button type="button" onClick={() => setIsThemeMenuOpen((v) => !v)} className="sc-theme-button" aria-expanded={isThemeMenuOpen} title="Theme">
@@ -14303,7 +13910,10 @@ export const Workspace: React.FC = () => {
               {isThemeMenuOpen && (
                 <div className="sc-theme-menu">
                   {[
-                    ['obsidian', 'Obsidian', 'Near-black surfaces with champagne/gold accents. Default workspace theme.'],
+                    ['hive', 'Hive', 'Lifted graphite panels around a dark image canvas, with a honey accent. Default workspace theme.'],
+                    ['tower', 'Tower', 'Control room: everything on screen at once, with a model switcher, live progress, aspect buttons, steppers and editable LoRA chips. Aviation-display colours.'],
+                    ['genko', 'Genkō', 'Light manuscript paper with ink frames and a red pencil. The app is split into full-screen pages: Draw, Library, Archive, Studio.'],
+                    ['obsidian', 'Obsidian', 'Near-black surfaces with champagne/gold accents. The previous default.'],
                     ['arctic', 'Arctic', 'Bright cool-gray surfaces with restrained steel-blue accents.'],
                     ['paper', 'Paper', 'Warm ivory surfaces with ink-like controls and muted brown accents.'],
                     ['terminal', 'Terminal', 'High-contrast black workspace with restrained green status accents.'],
@@ -14548,14 +14158,36 @@ export const Workspace: React.FC = () => {
       <div className="flex-1 w-full min-h-0 relative">
 
         <div className="hidden md:block w-full h-full">
-
-          <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
-
+          {isStudioLayout ? (
+            isDesktopViewport && (
+              <StudioShell
+                panels={components}
+                isGenerating={isGenerating}
+                onGenerate={() => void enqueueAndProcess()}
+                onCancel={cancelGeneration}
+                queuedCount={queuedCount}
+                isConnected={isConnected}
+                isReconnecting={isReconnecting}
+                modelCount={modelCount}
+                resolveImageUrl={resolveImageUrl}
+                onOpenImage={openHistoryGalleryImage}
+                onOpenSettings={() => setShowSettingsModal(true)}
+                onOpenShortcuts={() => setShowShortcutsModal(true)}
+                onOpenConsole={() => setShowConsole(true)}
+                onOpenPalette={() => setShowCommandPalette(true)}
+                onOpenDiagnostics={() => setShowDiagnostics((v) => !v)}
+                onUseSimplified={() => setIsSimplifiedUi(true)}
+              />
+            )
+          ) : (
+            <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
+          )}
         </div>
 
 
 
-        <div className="md:hidden w-full h-full pb-14 overflow-hidden">
+        {(!isStudioLayout || !isDesktopViewport) && (
+          <div className="md:hidden w-full h-full pb-14 overflow-hidden">
 
           {mobileActiveTab === 'canvas' && <PreviewPanel api={{} as any} containerApi={{} as any} params={{}} />}
 
@@ -14566,12 +14198,14 @@ export const Workspace: React.FC = () => {
           {mobileActiveTab === 'history' && <HistoryPanel api={{} as any} containerApi={{} as any} params={{}} />}
 
         </div>
+        )}
 
       </div>
 
 
 
-      {/* Bottom Tray */}
+      {/* Bottom Tray (the studio layouts host the prompt editor themselves) */}
+      {!isStudioLayout && (
 
       <div className={`sc-prompt-tray relative shrink-0 flex flex-col border-t z-30 ${
 
@@ -14638,6 +14272,7 @@ export const Workspace: React.FC = () => {
 
 
 
+      )}
       {/* Mobile Bottom Navigation Bar */}
 
       <div className="md:hidden fixed bottom-0 left-0 right-0 h-16 sc-mobile-nav flex items-center justify-around z-50 text-[10px] font-medium text-gray-400">
@@ -14779,7 +14414,7 @@ export const Workspace: React.FC = () => {
                         <label className="sc-setting-card">
                           <span className="sc-setting-label">Theme</span>
                           <select value={resolvedTheme} onChange={(e) => updateSettings({ uiTheme: e.target.value as AppSettings['uiTheme'] })} className="sc-setting-control">
-                            <option value="obsidian">Obsidian — black / champagne</option><option value="arctic">Arctic — cool light / steel</option><option value="paper">Paper — warm light / ink</option><option value="terminal">Terminal — black / green</option><option value="midnight">Midnight — navy / steel</option><option value="forest">Forest — charcoal / sage</option><option value="clay">Clay — terracotta / parchment</option><option value="mono">Monochrome — grayscale</option><option value="contrast">High Contrast — black / white</option><option value="nord">Nord — pale slate / blue</option><option value="dracula">Dracula — plum / lavender</option><option value="solarized">Solarized — parchment / gold</option><option value="rose">Rose — charcoal / dusty rose</option><option value="coffee">Coffeehouse — espresso / copper</option><option value="matrix">Matrix — black / green</option><option value="sunset">Sunset — plum / peach</option>
+                            <option value="hive">Hive — graphite / honey (rail + drawer)</option><option value="tower">Tower — control room (all-visible, quick controls)</option><option value="genko">Genkō — manuscript pages (light)</option><option value="obsidian">Obsidian — black / champagne</option><option value="arctic">Arctic — cool light / steel</option><option value="paper">Paper — warm light / ink</option><option value="terminal">Terminal — black / green</option><option value="midnight">Midnight — navy / steel</option><option value="forest">Forest — charcoal / sage</option><option value="clay">Clay — terracotta / parchment</option><option value="mono">Monochrome — grayscale</option><option value="contrast">High Contrast — black / white</option><option value="nord">Nord — pale slate / blue</option><option value="dracula">Dracula — plum / lavender</option><option value="solarized">Solarized — parchment / gold</option><option value="rose">Rose — charcoal / dusty rose</option><option value="coffee">Coffeehouse — espresso / copper</option><option value="matrix">Matrix — black / green</option><option value="sunset">Sunset — plum / peach</option>
                           </select>
                         </label>
                         <div className="sc-setting-card">
@@ -14887,7 +14522,7 @@ export const Workspace: React.FC = () => {
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Hide inline LoRA pills</span><span className="sc-setting-help">Keeps LoRAs in the prompt string but manages them from the dedicated LoRA strip above each box.</span></span><input type="checkbox" checked={settings.hideInlineLorasInPromptBoxes !== false} onChange={(e) => updateSettings({ hideInlineLorasInPromptBoxes: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show section headers</span><span className="sc-setting-help">Displays a compact header for every newline-delimited prompt section with focus and editing actions.</span></span><input type="checkbox" checked={settings.showPromptSectionHeaders !== false} onChange={(e) => updateSettings({ showPromptSectionHeaders: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show section statistics</span><span className="sc-setting-help">Shows tag count, character count, and LoRA count in section headers on larger panels.</span></span><input type="checkbox" checked={settings.showPromptSectionStats !== false} onChange={(e) => updateSettings({ showPromptSectionStats: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
-                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show selection toolbar</span><span className="sc-setting-help">Shows bulk weight, mute, move, copy, section, and delete controls when tags are selected.</span></span><input type="checkbox" checked={settings.showPromptSelectionToolbar !== false} onChange={(e) => updateSettings({ showPromptSelectionToolbar: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
+                      <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Show selection toolbar</span><span className="sc-setting-help">Shows bulk weight, disable/enable, move, copy, section, and delete controls when tags are selected.</span></span><input type="checkbox" checked={settings.showPromptSelectionToolbar !== false} onChange={(e) => updateSettings({ showPromptSelectionToolbar: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <label className="sc-setting-card sc-toggle-card"><span><span className="sc-setting-label">Enable SwarmUI syntax quick insert</span><span className="sc-setting-help">Adds one-click Random, Alternate, From-To, Wildcard, Repeat, Embed, Comment, and Param snippets.</span></span><input type="checkbox" checked={settings.promptSyntaxQuickInsert !== false} onChange={(e) => updateSettings({ promptSyntaxQuickInsert: e.target.checked })} className="w-5 h-5 accent-amber-500" /></label>
                       <div className="sc-setting-card"><span><span className="sc-setting-label">Prompt pill gestures</span><span className="sc-setting-help">Click a pill to edit it. Double-click to disable/enable it. While editing, double-click a word for normal Windows-style word selection. The legacy double-click editing setting is preserved only for migration compatibility.</span></span><span className="sc-setting-badge">Click / Double-click</span></div>
                     </div></div>
@@ -14902,7 +14537,7 @@ export const Workspace: React.FC = () => {
                     </div></div>
 
                     <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Panel View Modes</div><div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      {(['extraNetworks','history','gallery'] as const).map((panel) => <label key={panel} className="sc-setting-card"><span className="sc-setting-label">{panel === 'extraNetworks' ? 'Extra Networks' : panel[0].toUpperCase() + panel.slice(1)}</span><select value={settings.panelViewModes?.[panel] || 'cards'} onChange={(e) => updateSettings({ panelViewModes: { ...settings.panelViewModes, [panel]: e.target.value as 'cards' | 'compact' | 'list' } })} className="sc-setting-control"><option value="cards">Cards</option><option value="compact">Compact</option><option value="list">List</option></select></label>)}
+                      {(['extraNetworks','history','gallery'] as const).map((panel) => <label key={panel} className="sc-setting-card"><span className="sc-setting-label">{panel === 'extraNetworks' ? 'Extra Networks' : panel[0].toUpperCase() + panel.slice(1)}</span><select value={settings.panelViewModes?.[panel] || 'cards'} onChange={(e) => updateSettings({ panelViewModes: { ...settings.panelViewModes, [panel]: e.target.value as 'cards' | 'compact' | 'list' } })} className="sc-setting-control"><option value="cards">Cards</option>{panel === 'extraNetworks' && <option value="large">Large cards</option>}<option value="compact">Compact</option><option value="list">List</option></select></label>)}
                     </div></div>
 
                     <div className="sc-settings-section"><div className="text-base font-semibold text-gray-100 mb-3">Section Density</div><div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -14983,7 +14618,7 @@ export const Workspace: React.FC = () => {
 
                   ['Click a tag', 'Edit tag text'],
 
-                  ['Double-click a tag', 'Mute / re-enable the tag'],
+                  ['Double-click a tag', 'Disable / re-enable the tag'],
 
                   ['Double-click while editing', 'Select the word under the pointer'],
 

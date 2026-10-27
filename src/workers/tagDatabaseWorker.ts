@@ -2,7 +2,7 @@ import { buildWikiGroupHierarchy, DANBOORU_WIKI_GROUPS } from '../api/tagTaxonom
 import type { TagRecord } from '../api/tagTaxonomy';
 import { classifyTagDetailed, SFW_EXACT_MAP, cleanKey } from '../tagging/classifier';
 import type { ClassificationResult } from '../tagging/classifier';
-import { getSemanticPlacements, getPromptFlowPlacements, getPromptRolePlacements, BUILDER_PARENT_ORDER } from '../api/promptBuilderTaxonomies';
+import { getSemanticPlacements, getPromptFlowPlacements, getPromptRolePlacements, getPromptAllInOnePlacements, getPromptAllInOneDefaultPlacements, getPromptAllInOneDefaultTaxonomyEntries, BUILDER_PARENT_ORDER } from '../api/promptBuilderTaxonomies';
 import type { BuilderTaxonomyId } from '../api/promptBuilderTaxonomies';
 
 export interface WorkerAutocompleteItem { name: string; category: string; count: number | null }
@@ -35,6 +35,8 @@ let lookup = new Map<string, RichTagRecord>();
 let hierarchies: Record<Mode, Hierarchy> = { prompt_flow: {}, danbooru_types: {}, danbooru_groups: {} };
 let ready = false;
 let builderIndexes = new Map<BuilderTaxonomyId, Map<string, string[]>>();
+// Concurrent group/tag/autocomplete requests share one in-progress build per taxonomy.
+let builderIndexBuilds = new Map<BuilderTaxonomyId, Promise<Map<string, string[]>>>();
 
 export interface Hierarchy { [parent: string]: { [sub: string]: string[] } }
 
@@ -266,6 +268,8 @@ function getBuilderPlacements(record: RichTagRecord, taxonomy: BuilderTaxonomyId
   if (taxonomy === 'semantic') return getSemanticPlacements(record);
   if (taxonomy === 'prompt_flow') return getPromptFlowPlacements(record);
   if (taxonomy === 'anima_roles') return getPromptRolePlacements(record);
+  if (taxonomy === 'prompt_all_in_one') return getPromptAllInOnePlacements(record);
+  if (taxonomy === 'prompt_all_in_one_default') return getPromptAllInOneDefaultPlacements(record);
   if (taxonomy === 'danbooru_types') {
     const parent = record.nativeCategory || 'General';
     const sub = record.wikiCategory || (parent === 'Meta' ? 'Technical & Medium' : 'All Tags');
@@ -275,38 +279,84 @@ function getBuilderPlacements(record: RichTagRecord, taxonomy: BuilderTaxonomyId
   return getDanbooruGroupPlacements(record);
 }
 
-function getBuilderIndex(taxonomy: BuilderTaxonomyId): Map<string, string[]> {
+async function getBuilderIndex(taxonomy: BuilderTaxonomyId): Promise<Map<string, string[]>> {
   const cached = builderIndexes.get(taxonomy);
   if (cached) return cached;
+  const existingBuild = builderIndexBuilds.get(taxonomy);
+  if (existingBuild) return existingBuild;
 
-  const index = new Map<string, string[]>();
-  for (const record of records) {
-    const seen = new Set<string>();
-    for (const placement of getBuilderPlacements(record, taxonomy)) {
+  const build = (async () => {
+    const index = new Map<string, string[]>();
+    // A Set for every placement makes deduplication O(1), instead of rescanning
+    // increasingly large subgroups for every tag.
+    const keysByPlacement = new Map<string, Set<string>>();
+    const add = (tag: string, placement: { parent: string; sub: string; leaf?: string }) => {
       const parent = placement.parent || 'General';
       const sub = placement.sub || 'General';
       const leaf = placement.leaf || '';
       const key = placementKey(parent, sub, leaf);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const list = index.get(key);
-      if (list) list.push(record.tag);
-      else index.set(key, [record.tag]);
+      const normalizedTag = cleanKey(tag);
+      if (!normalizedTag) return;
+      let seen = keysByPlacement.get(key);
+      if (!seen) {
+        seen = new Set<string>();
+        keysByPlacement.set(key, seen);
+      }
+      if (seen.has(normalizedTag)) return;
+      seen.add(normalizedTag);
+      let list = index.get(key);
+      if (!list) {
+        list = [];
+        index.set(key, list);
+      }
+      list.push(tag);
+    };
+
+    // Yield every few hundred records. This prevents a full taxonomy build from
+    // monopolizing the worker event loop and causing unrelated GET_BUILDER_TAGS
+    // requests for the All view to time out while waiting in the message queue.
+    const yieldToWorker = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < records.length; i += 1) {
+      const record = records[i];
+      const seenForRecord = new Set<string>();
+      for (const placement of getBuilderPlacements(record, taxonomy)) {
+        const key = placementKey(placement.parent || 'General', placement.sub || 'General', placement.leaf || '');
+        if (seenForRecord.has(key)) continue;
+        seenForRecord.add(key);
+        add(record.tag, placement);
+      }
+      if ((i + 1) % 400 === 0) await yieldToWorker();
     }
-  }
 
-  for (const tags of index.values()) {
-    tags.sort((a, b) => {
-      const ac = lookup.get(cleanKey(a))?.postCount ?? -1;
-      const bc = lookup.get(cleanKey(b))?.postCount ?? -1;
-      return bc - ac || a.localeCompare(b);
-    });
-  }
+    // default.yaml also includes curated words absent from the bundled CSV.
+    if (taxonomy === 'prompt_all_in_one_default') {
+      const entries = getPromptAllInOneDefaultTaxonomyEntries();
+      for (let i = 0; i < entries.length; i += 1) {
+        const entry = entries[i];
+        for (const placement of entry.placements) add(entry.tag, placement);
+        if ((i + 1) % 400 === 0) await yieldToWorker();
+      }
+    }
 
-  builderIndexes.set(taxonomy, index);
-  return index;
+    for (const tags of index.values()) {
+      tags.sort((a, b) => {
+        const ac = lookup.get(cleanKey(a))?.postCount ?? -1;
+        const bc = lookup.get(cleanKey(b))?.postCount ?? -1;
+        return bc - ac || a.localeCompare(b);
+      });
+    }
+
+    builderIndexes.set(taxonomy, index);
+    return index;
+  })();
+
+  builderIndexBuilds.set(taxonomy, build);
+  try {
+    return await build;
+  } finally {
+    if (builderIndexBuilds.get(taxonomy) === build) builderIndexBuilds.delete(taxonomy);
+  }
 }
-
 function orderedBuilderGroups(taxonomy: BuilderTaxonomyId, groups: Array<{ parent: string; sub: string; leaf?: string; count: number }>) {
   const order = BUILDER_PARENT_ORDER[taxonomy] || [];
   return groups.sort((a, b) => {
@@ -366,6 +416,7 @@ self.onmessage = async (e: MessageEvent) => {
           tag,
           normalizedTag: key,
           postCount: count,
+          aliases: (parts[3] || '').split(',').map((alias) => alias.trim()).filter(Boolean),
           nativeCategory: native,
           nativeCategoryCode: code,
           wikiCategory: wiki,
@@ -390,6 +441,7 @@ self.onmessage = async (e: MessageEvent) => {
             tag: dictTag.replace(/_/g, ' '),
             normalizedTag: key,
             postCount: null,
+            aliases: [],
             nativeCategory: 'General',
             nativeCategoryCode: '0',
             wikiCategory: null,
@@ -409,8 +461,35 @@ self.onmessage = async (e: MessageEvent) => {
       records = next;
       lookup = new Map(records.map((r) => [r.normalizedTag, r]));
       builderIndexes = new Map<BuilderTaxonomyId, Map<string, string[]>>();
+      builderIndexBuilds = new Map<BuilderTaxonomyId, Promise<Map<string, string[]>>>();
       for (const r of records) {
         lookup.set(cleanKey(r.tag), r);
+      }
+      // Tags present only in the uploaded extension YAML need lookup metadata for filters,
+      // autocomplete and descriptions. Keep them out of the base record list so other taxonomy
+      // modes remain unchanged; the default.yaml index adds them only in its own mode.
+      for (const entry of getPromptAllInOneDefaultTaxonomyEntries()) {
+        const key = cleanKey(entry.tag);
+        if (!key || lookup.has(key)) continue;
+        const classification: ClassificationResult = classifyTagDetailed(entry.tag, 'General', '0', null, null, null);
+        lookup.set(key, {
+          tag: entry.tag,
+          normalizedTag: key,
+          postCount: null,
+          aliases: [],
+          nativeCategory: 'General',
+          nativeCategoryCode: '0',
+          wikiCategory: null,
+          uiCategory: classification.primary.parent,
+          uiSubCategory: classification.primary.sub,
+          uiSubSubCategory: classification.primary.subSub || null,
+          description: null,
+          isMeaningless: false,
+          secondaryUiCategories: classification.secondary,
+          classificationConfidence: classification.confidence,
+          classificationSources: ['prompt_all_in_one_default_yaml'],
+          isNsfw: classification.isNsfw ?? false,
+        });
       }
 
       ready = true;
@@ -511,16 +590,18 @@ self.onmessage = async (e: MessageEvent) => {
     if (type === 'GET_BUILDER_GROUPS') {
       const taxonomy = (payload.taxonomy || 'prompt_flow') as BuilderTaxonomyId;
       const sfwFilter = (payload.sfwFilter || 'all') as 'all' | 'sfw' | 'nsfw';
-      const index = getBuilderIndex(taxonomy);
+      const index = await getBuilderIndex(taxonomy);
       const groups: Array<{ parent: string; sub: string; leaf?: string; count: number }> = [];
       for (const [key, tags] of index.entries()) {
         const [parent, sub, leaf] = key.split('\u001f');
         const filtered = filterBuilderTags(tags, sfwFilter);
         if (filtered.length) groups.push({ parent, sub, leaf: leaf || undefined, count: new Set(filtered).size });
       }
-      const uniqueFiltered = sfwFilter === 'all'
-        ? records.length
-        : records.reduce((count, record) => count + (sfwFilter === 'nsfw' ? (record.isNsfw ? 1 : 0) : (!record.isNsfw ? 1 : 0)), 0);
+      const allIndexedTagKeys = new Set([...index.values()].flat().map((tag) => cleanKey(tag)));
+      const uniqueFiltered = [...allIndexedTagKeys].filter((key) => {
+        const record = lookup.get(key);
+        return !record || sfwFilter === 'all' || (sfwFilter === 'nsfw' ? record.isNsfw : !record.isNsfw);
+      }).length;
       const placementTotal = groups.reduce((sum, group) => sum + group.count, 0);
       self.postMessage({ id, success: true, data: { taxonomy, sfwFilter, totalTags: uniqueFiltered, placementTotal, groups: orderedBuilderGroups(taxonomy, groups) } });
       return;
@@ -537,24 +618,36 @@ self.onmessage = async (e: MessageEvent) => {
       const limit = Math.min(300, Math.max(20, Math.floor(payload.limit || 120)));
 
       let list: string[];
-      const index = getBuilderIndex(taxonomy);
+      // The All-tags view can be served directly from records. Building every taxonomy
+      // placement here was unnecessary and made the first All request wait for a full
+      // classification/index pass. Build the expensive taxonomy index only for a category.
+      const index = parent === 'All' || !parent ? null : await getBuilderIndex(taxonomy);
       if (parent === 'All' || !parent) {
-        list = records.map((record) => record.tag);
+        if (taxonomy === 'prompt_all_in_one_default') {
+          const all = new Map<string, string>();
+          for (const tag of [...records.map((record) => record.tag), ...getPromptAllInOneDefaultTaxonomyEntries().map((entry) => entry.tag)]) {
+            const key = cleanKey(tag);
+            if (key && !all.has(key)) all.set(key, tag);
+          }
+          list = [...all.values()];
+        } else {
+          list = records.map((record) => record.tag);
+        }
       } else if (!sub) {
         // Selecting a parent means all of its subcategories/leaves.
         list = [];
-        for (const [key, tags] of index.entries()) {
+        for (const [key, tags] of index!.entries()) {
           if (key.startsWith(`${parent}\u001f`)) list.push(...tags);
         }
       } else if (!leaf) {
         // Selecting a subcategory means all of its leaves.
         list = [];
         const prefix = `${parent}\u001f${sub}\u001f`;
-        for (const [key, tags] of index.entries()) {
+        for (const [key, tags] of index!.entries()) {
           if (key === placementKey(parent, sub, '') || key.startsWith(prefix)) list.push(...tags);
         }
       } else {
-        list = index.get(placementKey(parent, sub, leaf)) || [];
+        list = index!.get(placementKey(parent, sub, leaf)) || [];
       }
 
       list = filterBuilderTags([...new Set(list)], sfwFilter);
@@ -607,7 +700,7 @@ self.onmessage = async (e: MessageEvent) => {
       const limit = Math.min(24, Math.max(1, Number(payload.limit || 12)));
       if (!q) { self.postMessage({ id, success: true, data: [] }); return; }
 
-      const index = getBuilderIndex(taxonomy);
+      const index = await getBuilderIndex(taxonomy);
       const candidates = new Set<string>();
       for (const [key, tags] of index.entries()) {
         const [entryParent, entrySub, entryLeaf] = key.split('\u001f');

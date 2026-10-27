@@ -1,0 +1,301 @@
+/* ==========================================================================
+   Hive — the default SwarmCanvas theme.
+
+   Idea: the image is the light source. Panels are lifted graphite so the canvas
+   (the darkest surface) is where the eye lands; honey is spent only on the one
+   thing that is active or primary at any moment. Everything else is neutral.
+
+   This file only adds a theme. Non-Obsidian themes already run through the
+   token-remapping rules in index.css, so most of the work is the token set; the
+   rules below fix the places where index.css hard-codes the old gold values.
+   Load order: after index.css.
+   ========================================================================== */
+
+:root[data-ui-theme="hive"] {
+  color-scheme: dark;
+
+  /* Surfaces: void (canvas) < panel < control < hover. */
+  --sc-black: #07090c;
+  --sc-bg: #0b0d11;
+  --sc-surface-0: #0e1115;
+  --sc-surface-1: #151921;
+  --sc-surface-2: #1c212b;
+  --sc-surface-3: #262c38;
+  --sc-surface-4: #303846;
+  --sc-border: #2c333f;
+  --sc-theme-border: #2c333f;
+  --sc-border-soft: #232932;
+
+  /* Text. */
+  --sc-text: #eceef3;
+  --sc-text-secondary: #c3c8d2;
+  --sc-text-muted: #a1a8b5;
+  --sc-text-dim: #848c9c;
+
+  /* Honey is the one accent. Warning shares its family, as it already does in other themes. */
+  --sc-gold: #f2b94b;
+  --sc-gold-strong: #ffcb66;
+  --sc-gold-soft: rgba(242, 185, 75, 0.14);
+  --sc-info: #6aa8ff;
+  --sc-info-soft: rgba(106, 168, 255, 0.14);
+  --sc-success: #5fcf9f;
+  --sc-success-soft: rgba(95, 207, 159, 0.14);
+  --sc-warning: #f2b94b;
+  --sc-warning-soft: rgba(242, 185, 75, 0.14);
+  --sc-danger: #ff7f8a;
+  --sc-danger-soft: rgba(255, 127, 138, 0.14);
+
+  --sc-theme-shadow: rgba(2, 4, 8, 0.5);
+  --sc-radius-sm: 7px;
+  --sc-radius-md: 10px;
+  --sc-radius-lg: 14px;
+  --sc-shadow: 0 16px 38px rgba(2, 4, 8, 0.45);
+  --sc-shadow-soft: 0 8px 22px rgba(2, 4, 8, 0.32);
+
+  /* Type. Native faces only (no download, works offline in the desktop app):
+     Segoe UI Variable for reading, Bahnschrift (a DIN-style face that ships with Windows)
+     for panel titles, tabs and the wordmark, Cascadia for numbers and file names. */
+  --sc-font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "SF Pro Text", Roboto, "Helvetica Neue", sans-serif;
+  --sc-font-display: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+  --sc-font-mono: "Cascadia Mono", "Cascadia Code", "SF Mono", Consolas, "Liberation Mono", monospace;
+  --font-sans: var(--sc-font-ui);
+  --font-mono: var(--sc-font-mono);
+
+  --sc-focus-ring: 0 0 0 2px var(--sc-surface-1), 0 0 0 4px rgba(242, 185, 75, 0.85);
+}
+
+.sc-workspace-shell[data-ui-theme="hive"] {
+  --sc-panel-bg: var(--sc-surface-1);
+  --sc-panel-raised: var(--sc-surface-2);
+  --sc-control-bg: var(--sc-surface-2);
+  --sc-control-hover: var(--sc-surface-3);
+  font-family: var(--sc-font-ui);
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  accent-color: var(--sc-gold);
+}
+
+:root[data-ui-theme="hive"] body {
+  font-family: var(--sc-font-ui);
+  background: var(--sc-bg);
+}
+
+:root[data-ui-theme="hive"] ::selection {
+  background: rgba(242, 185, 75, 0.32);
+  color: #fff;
+}
+
+/* --- Keyboard focus: one ring everywhere, visible on every surface. --------- */
+.sc-workspace-shell[data-ui-theme="hive"] :is(button, a, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: none !important;
+  box-shadow: var(--sc-focus-ring) !important;
+}
+.sc-workspace-shell[data-ui-theme="hive"] :is(input, select, textarea):focus {
+  border-color: rgba(242, 185, 75, 0.7) !important;
+}
+
+/* --- Scrollbars: the standard properties (they take precedence over ::-webkit-scrollbar in WebView2). */
+.sc-workspace-shell[data-ui-theme="hive"] * {
+  scrollbar-color: var(--sc-surface-4) transparent;
+  scrollbar-width: thin;
+}
+
+/* --- Top bar --------------------------------------------------------------- */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar {
+  height: 46px !important;
+  background: var(--sc-surface-1) !important;
+  border-bottom: 1px solid var(--sc-border) !important;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-left > button,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-actions > button,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-actions .relative > button {
+  background: var(--sc-surface-2) !important;
+  color: var(--sc-text-secondary) !important;
+  border-radius: 8px !important;
+  transition: background .14s ease, color .14s ease;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-left > button:hover,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-actions > button:hover,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-workspace-topbar-actions .relative > button:hover {
+  background: var(--sc-surface-3) !important;
+  color: var(--sc-text) !important;
+}
+
+/* Wordmark. Plain text in the display face; the mark carries the colour. */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-brand-name {
+  font-family: var(--sc-font-display);
+  font-weight: 650;
+  font-size: calc(14.5px * var(--sc-font-scale, 1));
+  letter-spacing: .015em;
+  color: var(--sc-text);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-brand-suffix {
+  font-size: calc(10.5px * var(--sc-font-scale, 1));
+  color: var(--sc-text-muted);
+  background: var(--sc-surface-3);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+/* App tabs (Canvas / Animation Lab). */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-app-tabs {
+  background: var(--sc-surface-0);
+  box-shadow: inset 0 0 0 1px var(--sc-border-soft);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-app-tab { font-family: var(--sc-font-display); font-weight: 600; letter-spacing: .01em; }
+.sc-workspace-shell[data-ui-theme="hive"] .sc-app-tab:hover { background: var(--sc-surface-2); color: var(--sc-text); }
+.sc-workspace-shell[data-ui-theme="hive"] .sc-app-tab.is-active {
+  color: var(--sc-text);
+  background: var(--sc-surface-3);
+  box-shadow: inset 0 -2px 0 var(--sc-gold), inset 0 0 0 1px var(--sc-border);
+}
+
+/* --- Dockview: panels as lifted slabs around a dark canvas ---------------- */
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark {
+  --dv-group-view-background-color: var(--sc-surface-1);
+  --dv-tabs-and-actions-container-background-color: var(--sc-surface-1);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--sc-surface-1);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--sc-surface-0);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--sc-surface-1);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--sc-surface-0);
+  --dv-tab-divider-color: var(--sc-border-soft);
+  --dv-dockview-background-color: var(--sc-bg);
+  --dv-separator-border: var(--sc-border-soft);
+  --dv-paneview-active-outline-color: rgba(242, 185, 75, 0.5);
+  --dv-drag-over-background-color: rgba(242, 185, 75, 0.1);
+  --dv-tab-color: var(--sc-text-muted);
+  --dv-active-tab-color: var(--sc-text);
+  --dv-active-group-visiblepanel-tab-color: var(--sc-text);
+  --dv-tabs-container-scrollbar-color: var(--sc-surface-4);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-tab {
+  font-family: var(--sc-font-display);
+  font-size: calc(12.5px * var(--sc-font-scale, 1));
+  font-weight: 600;
+  letter-spacing: .012em;
+  background: var(--sc-surface-0) !important;
+  color: var(--sc-text-muted) !important;
+  transition: background .14s ease, color .14s ease;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-tab:hover {
+  background: var(--sc-surface-2) !important;
+  color: var(--sc-text) !important;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-tab.dv-active-tab {
+  background: var(--sc-surface-1) !important;
+  color: var(--sc-text) !important;
+  box-shadow: inset 0 -2px 0 var(--sc-gold) !important;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-groupview {
+  background: var(--sc-surface-1) !important;
+}
+/* Separators brighten where you can grab them. */
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-sash { transition: background .14s ease; }
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-sash:hover,
+.sc-workspace-shell[data-ui-theme="hive"] .dockview-theme-dark .dv-sash:active { background: rgba(242, 185, 75, 0.55) !important; }
+
+/* --- Buttons --------------------------------------------------------------- */
+/* Generate is the one solid honey control in the whole interface. */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button {
+  background: linear-gradient(180deg, #ffd06e 0%, #f2b94b 55%, #e9a62f 100%);
+  color: #1b1408;
+  font-family: var(--sc-font-display);
+  font-weight: 700;
+  letter-spacing: .015em;
+  border-radius: 10px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) inset, 0 6px 18px rgba(242, 185, 75, 0.2);
+  transition: filter .14s ease, transform .08s ease, box-shadow .14s ease;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button:hover {
+  background: linear-gradient(180deg, #ffd980 0%, #f7c25a 55%, #efae38 100%);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.4) inset, 0 8px 22px rgba(242, 185, 75, 0.3);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button:active { transform: translateY(1px); filter: brightness(.96); }
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button:disabled { background: var(--sc-surface-3); color: var(--sc-text-dim); box-shadow: none; cursor: not-allowed; }
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button.is-cancel {
+  background: rgba(255, 127, 138, 0.16);
+  color: #ffc1c7;
+  box-shadow: inset 0 0 0 1px rgba(255, 127, 138, 0.5);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-generate-button.is-cancel:hover { background: rgba(255, 127, 138, 0.26); }
+
+.sc-workspace-shell[data-ui-theme="hive"] .sc-action-primary {
+  background: var(--sc-gold-soft);
+  color: var(--sc-gold-strong);
+  box-shadow: inset 0 0 0 1px rgba(242, 185, 75, 0.4);
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-action-primary:hover { background: rgba(242, 185, 75, 0.22); }
+
+/* --- Surfaces: menus, modals, toasts -------------------------------------- */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-context-menu,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-theme-menu,
+.sc-workspace-shell[data-ui-theme="hive"] .sc-settings-modal {
+  background: var(--sc-surface-1) !important;
+  border: 1px solid var(--sc-border) !important;
+  border-radius: var(--sc-radius-lg) !important;
+  box-shadow: var(--sc-shadow) !important;
+}
+.sc-workspace-shell[data-ui-theme="hive"] .sc-context-menu-item:hover { background: var(--sc-surface-3) !important; }
+
+/* Dialogs built from the shared card classes. */
+.sc-workspace-shell[data-ui-theme="hive"] .sc-dialog-backdrop { background: rgba(5, 7, 10, 0.72) !important; backdrop-filter: blur(6px); }
+.sc-workspace-shell[data-ui-theme="hive"] .sc-dialog-card { border-radius: var(--sc-radius-lg); box-shadow: var(--sc-shadow); }
+
+/* Numbers and file names read better in the mono face. */
+.sc-workspace-shell[data-ui-theme="hive"] input[type="number"],
+.sc-workspace-shell[data-ui-theme="hive"] .font-mono { font-family: var(--sc-font-mono); }
+
+/* Range sliders: honey thumb on a neutral track. */
+.sc-workspace-shell[data-ui-theme="hive"] input[type="range"] { accent-color: var(--sc-gold); }
+
+/* --- Empty state ----------------------------------------------------------- */
+.sc-empty-title {
+  font-family: var(--sc-font-display, inherit);
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--sc-text);
+}
+.sc-empty-body { font-size: 12px; line-height: 1.55; color: var(--sc-text-muted); }
+.sc-empty-mark { opacity: .9; filter: saturate(.85); }
+.sc-empty-action {
+  margin-top: 2px;
+  padding: 7px 14px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--sc-gold-strong);
+  background: var(--sc-gold-soft);
+  box-shadow: inset 0 0 0 1px rgba(242, 185, 75, 0.38);
+  cursor: pointer;
+  transition: background .14s ease;
+}
+.sc-empty-action:hover { background: rgba(242, 185, 75, 0.24); }
+
+/* --- Brand mark motion ----------------------------------------------------- */
+/* One orchestrated moment: the three cells settle in when the app opens. While a generation runs the
+   cells pulse one after another, so the mark doubles as a quiet activity indicator. */
+@keyframes sc-cell-in {
+  from { opacity: 0; transform: scale(.78); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes sc-cell-work {
+  0%, 100% { opacity: 1; transform: none; }
+  50% { opacity: .5; transform: scale(.93); }
+}
+.sc-brand-mark .sc-cell { transform-box: fill-box; transform-origin: center; animation: sc-cell-in .6s cubic-bezier(.2, .8, .2, 1) both; }
+.sc-brand-mark .sc-cell-a { animation-delay: .04s; }
+.sc-brand-mark .sc-cell-b { animation-delay: .16s; }
+.sc-brand-mark .sc-cell-c { animation-delay: .28s; }
+.sc-brand-mark[data-busy="true"] .sc-cell { animation: sc-cell-work 1.3s ease-in-out infinite; }
+.sc-brand-mark[data-busy="true"] .sc-cell-b { animation-delay: .22s; }
+.sc-brand-mark[data-busy="true"] .sc-cell-c { animation-delay: .44s; }
+.sc-empty-mark .sc-cell { animation: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sc-brand-mark .sc-cell,
+  .sc-brand-mark[data-busy="true"] .sc-cell { animation: none !important; }
+  .sc-workspace-shell[data-ui-theme="hive"] * { transition-duration: .01ms !important; }
+}
+
+/* Theme picker swatch */
+.sc-theme-swatch[data-theme-swatch="hive"] { background: linear-gradient(145deg,#0e1115 0 58%,#f2b94b 59% 67%,#1c212b 68%); }

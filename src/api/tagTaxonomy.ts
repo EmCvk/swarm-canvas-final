@@ -5,7 +5,7 @@ import { CUSTOM_CATEGORIES } from './customTagDatabase';
 
 export interface CategoryPath { parent: string; sub: string; subSub?: string }
 export interface TagRecord {
-  tag: string; normalizedTag: string; postCount: number | null;
+  tag: string; normalizedTag: string; postCount: number | null; aliases?: string[];
   nativeCategory: string; nativeCategoryCode: string; wikiCategory: string | null;
   uiCategory: string; uiSubCategory: string; uiSubSubCategory: string | null;
   description: string | null; isMeaningless: boolean;

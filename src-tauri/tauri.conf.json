@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "swarm-canvas",
+  "productName": "SwarmCanvas",
   "version": "0.1.0",
   "identifier": "com.cevik.swarm-canvas",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "swarm-canvas",
+        "title": "SwarmCanvas",
         "width": 1400,
         "height": 900,
+        "minWidth": 960,
+        "minHeight": 600,
         "dragDropEnabled": false
       }
     ],

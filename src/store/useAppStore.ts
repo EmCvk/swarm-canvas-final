@@ -2,7 +2,7 @@ import { create, type StateCreator } from 'zustand';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { swarmClient, SwarmProgressData, ServerImageItem, emitDiagnostic } from '../api/swarmClient';
-import { civitaiService, CivitaiAssetType } from '../api/civitaiService';
+import { civitaiService, CivitaiAssetType, CivitaiUpdateInfo } from '../api/civitaiService';
 import { emitToast } from '../utils/toast';
 import { addHistoryItemsToProject, loadProjectEntries, updateProjectEntryMetadata, removeProjectEntries } from '../api/projectStorage';
 
@@ -23,6 +23,8 @@ export interface ModelItem {
   civitaiCompleteness?: number;
   civitaiStatus?: 'idle' | 'matched' | 'partial' | 'unresolved' | 'temporarily_failed' | 'not_found' | 'manual';
   civitaiUrl?: string;
+  /** Set by the update check when a newer version of this model exists on Civitai. */
+  civitaiUpdate?: CivitaiUpdateInfo;
   aliases?: string[];
   favorite?: boolean;
   pinned?: boolean;
@@ -204,13 +206,19 @@ export interface AppSettings {
 
   // Panel View Mode Preservations
   panelViewModes: {
-    extraNetworks: 'cards' | 'compact' | 'list';
+    extraNetworks: 'cards' | 'large' | 'compact' | 'list';
     history: 'cards' | 'compact' | 'list';
     gallery: 'cards' | 'compact' | 'list';
   };
+  /** How model card thumbnails fill their frame: 'crop' fills it (default), 'fit' shows the whole image. */
+  thumbnailFit?: 'crop' | 'fit';
+  /** Set once the default theme has moved from Obsidian to Hive. */
+  hiveThemeOffered?: boolean;
+  /** Minimum width in px of a card in the Large cards view (default 280). */
+  largeCardSize?: number;
 
   // UI Theme Checkpoint Switch
-  uiTheme: 'obsidian' | 'arctic' | 'paper' | 'terminal' | 'midnight' | 'forest' | 'clay' | 'mono' | 'contrast' | 'nord' | 'dracula' | 'solarized' | 'rose' | 'coffee' | 'matrix' | 'sunset' | 'cyber_black' | 'classic';
+  uiTheme: 'hive' | 'tower' | 'genko' | 'obsidian' | 'arctic' | 'paper' | 'terminal' | 'midnight' | 'forest' | 'clay' | 'mono' | 'contrast' | 'nord' | 'dracula' | 'solarized' | 'rose' | 'coffee' | 'matrix' | 'sunset' | 'simplified' | 'cyber_black' | 'classic';
   fontScale: number;
   autoApplyModelPreset: boolean;
   hideInlineLorasInPromptBoxes: boolean;
@@ -494,8 +502,15 @@ export interface AppState {
   saveImagesToProject: (items: HistoryItem[]) => Promise<HistoryItem[]>;
   syncCivitaiMetadata: (
     category: string,
-    onProgress: (current: number, total: number, name: string) => void
+    onProgress: (current: number, total: number, name: string) => void,
+    options?: { folder?: string; force?: boolean; names?: string[]; mode?: 'missing' }
   ) => Promise<void>;
+  loadMoreCivitaiPreviews: (type: CivitaiAssetType, name: string) => Promise<number>;
+  checkCivitaiUpdates: (
+    category: string,
+    onProgress: (current: number, total: number, name: string) => void,
+    options?: { folder?: string; names?: string[] }
+  ) => Promise<{ updates: number; current: number; unknown: number; skipped: number }>;
 
   setIsComparing: (b: boolean) => void;
   setComparisonImage: (url: string | null) => void;
@@ -539,6 +554,9 @@ export interface AppState {
   markModelUsed: (type: CivitaiAssetType, name: string) => void;
   updateControlNet: (id: string, updates: Partial<ControlNetUnit>) => void;
   updateADetailer: (id: string, updates: Partial<ADetailerUnit>) => void;
+  /** Appends a new pass cloned from the latest one (disabled) and returns its id. */
+  addADetailerPass: () => string;
+  removeADetailerPass: (id: string) => void;
   updateSettings: (s: Partial<AppSettings>) => void;
   setSectionScale: (section: keyof AppSettings['sectionScales'], scale: number) => void;
   setCategorizationMode: (mode: AppSettings['categorizationMode']) => void;
@@ -803,7 +821,7 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           history: 'cards',
           gallery: 'cards',
         },
-        uiTheme: 'obsidian',
+        uiTheme: 'hive',
         fontScale: 100,
         autoApplyModelPreset: false,
         hideInlineLorasInPromptBoxes: true,
@@ -929,6 +947,13 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
             swarmClient.listYoloModels().catch(() => []),
           ]);
 
+          const emptyCatalogs = [models, loras, embeddings].every((list) => !list || list.length === 0);
+          emitDiagnostic({
+            level: emptyCatalogs ? 'warn' : 'info',
+            scope: 'assets',
+            message: `SwarmUI returned ${models?.length ?? 0} models, ${loras?.length ?? 0} LoRAs, ${embeddings?.length ?? 0} embeddings, ${wildcards?.length ?? 0} wildcards.${emptyCatalogs ? ' The server returned no models: check that SwarmUI is running at the configured URL and that its backend has finished loading. Existing lists were left unchanged.' : ''}`,
+          });
+
           const formatItems = (list: any[]): ModelItem[] =>
             (list || []).map((m: any) => ({
               name: m.name,
@@ -959,9 +984,16 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           const merge = (fresh: ModelItem[], previous: ModelItem[], type: CivitaiAssetType): ModelItem[] => {
             const previousByName = new Map(previous.map((item) => [item.name.toLowerCase(), item]));
             return fresh.map((item) => {
-              const old = previousByName.get(item.name.toLowerCase());
+              const rawOld = previousByName.get(item.name.toLowerCase());
               const persisted = civitaiService.getPersistedMetadata(item.name, type);
+              // Without a trusted stored match, drop the previous Civitai-derived fields so an
+              // invalidated (wrong) match cannot linger in memory. Favorites, pins, aliases etc. stay.
+              const civitaiKeys = ['previewUrl', 'previewUrls', 'triggerWords', 'description', 'baseModel', 'modelName', 'versionName', 'modelId', 'versionId', 'fileName', 'civitaiMatchedBy', 'civitaiConfidence', 'civitaiCompleteness', 'civitaiStatus', 'civitaiError', 'civitaiUrl'];
+              const old = rawOld && !persisted
+                ? (Object.fromEntries(Object.entries(rawOld).filter(([key]) => !civitaiKeys.includes(key))) as unknown as ModelItem)
+                : rawOld;
               const manualUrl = civitaiService.getCivitaiUrl(item.name, type);
+              const storedFailure = persisted ? undefined : civitaiService.getFailure(item.name, type);
               return {
                 ...old, ...item,
                 previewUrl: persisted?.previewUrl || item.previewUrl || old?.previewUrl,
@@ -977,7 +1009,9 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
                 civitaiMatchedBy: persisted?.matchedBy || item.civitaiMatchedBy || old?.civitaiMatchedBy,
                 civitaiConfidence: persisted?.confidence ?? item.civitaiConfidence ?? old?.civitaiConfidence,
                 civitaiCompleteness: persisted?.completeness ?? item.civitaiCompleteness ?? old?.civitaiCompleteness,
-                civitaiStatus: persisted ? ((persisted.completeness || 0) >= 100 ? 'matched' : 'partial') : item.civitaiStatus || old?.civitaiStatus,
+                civitaiStatus: persisted ? ((persisted.completeness || 0) >= 100 ? 'matched' : 'partial') : (manualUrl ? 'manual' : (storedFailure ? (storedFailure.status === 'temporarily_failed' ? 'temporarily_failed' : 'unresolved') : item.civitaiStatus || old?.civitaiStatus)),
+                civitaiUpdate: persisted?.versionId ? civitaiService.getUpdateInfo(item.name, type, persisted.versionId) : undefined,
+                civitaiError: persisted ? undefined : (storedFailure?.failureReason || storedFailure?.reason || item.civitaiError || old?.civitaiError),
                 civitaiUrl: manualUrl || persisted?.civitaiUrl || item.civitaiUrl || old?.civitaiUrl,
                 aliases: old?.aliases || item.aliases || [],
                 favorite: old?.favorite ?? item.favorite ?? false,
@@ -1026,6 +1060,7 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           set({ isConnected: await swarmClient.testConnection() });
         } catch (err) {
           console.error('[Store] Failed to load asset catalogs:', err);
+          emitDiagnostic({ level: 'error', scope: 'assets', message: `Failed to load asset catalogs: ${err instanceof Error ? err.message : String(err)}` });
           set({ isConnected: false });
         }
       },
@@ -1213,15 +1248,28 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
         }
       },
 
-      syncCivitaiMetadata: async (category, onProgress) => {
+      syncCivitaiMetadata: async (category: string, onProgress: (current: number, total: number, name: string) => void, options: { folder?: string; force?: boolean; names?: string[]; mode?: 'missing' } = {}) => {
         const state = get();
+        const folder = (options.folder || 'all').replace(/\\/g, '/');
+        const force = Boolean(options.force);
+        const nameSet = options.names ? new Set(options.names) : null;
+        const inFolder = (name: string) => {
+          if (nameSet) return nameSet.has(name);
+          if (folder === 'all') return true;
+          const normalized = name.replace(/\\/g, '/');
+          if (folder === '/') return !normalized.includes('/');
+          return normalized.startsWith(`${folder}/`);
+        };
         const targets: { listName: 'modelsList' | 'lorasList' | 'embeddingsList'; type: CivitaiAssetType; items: ModelItem[] }[] = [];
-        if (category === 'all' || category === 'models') targets.push({ listName: 'modelsList', type: 'model', items: state.modelsList });
-        if (category === 'all' || category === 'loras') targets.push({ listName: 'lorasList', type: 'lora', items: state.lorasList });
-        if (category === 'all' || category === 'embeddings') targets.push({ listName: 'embeddingsList', type: 'embedding', items: state.embeddingsList });
+        if (category === 'all' || category === 'models') targets.push({ listName: 'modelsList', type: 'model', items: state.modelsList.filter((i) => inFolder(i.name)) });
+        if (category === 'all' || category === 'loras') targets.push({ listName: 'lorasList', type: 'lora', items: state.lorasList.filter((i) => inFolder(i.name)) });
+        if (category === 'all' || category === 'embeddings') targets.push({ listName: 'embeddingsList', type: 'embedding', items: state.embeddingsList.filter((i) => inFolder(i.name)) });
         const total = targets.reduce((n, t) => n + t.items.length, 0);
         if (!total) return;
         let processed = 0;
+        let resolved = 0;
+        let failed = 0;
+        let skipped = 0;
 
         try {
           await civitaiService.prefetchBySha256(targets.flatMap((t) => t.items.map((item) => ({ filename: item.name, type: t.type, hints: { sha256: item.sha256 } }))));
@@ -1233,23 +1281,86 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
           for (const item of target.items) {
             processed += 1;
             onProgress?.(processed, total, item.name);
-            const hasUsableMetadata = Boolean(item.modelId || item.versionId || item.baseModel || item.previewUrl || item.triggerWords?.length);
+            // Read the latest copy: the hash prefetch above may already have filled this item in.
+            const latest = (get()[target.listName] as ModelItem[]).find((x) => x.name === item.name) || item;
+            const persisted = civitaiService.getPersistedMetadata(item.name, target.type);
             const manual = civitaiService.getCivitaiUrl(item.name, target.type);
-            if (hasUsableMetadata && !manual && item.civitaiCompleteness && item.civitaiCompleteness >= 100) continue;
+            const complete = Boolean(persisted && (persisted.completeness ?? 0) >= 100) || (latest.civitaiCompleteness ?? 0) >= 100;
+            if (options.mode === 'missing') {
+              // Only assets with no Civitai metadata at all: partial results and manual links are left alone.
+              const hasAnyMetadata = Boolean(persisted) || (latest.civitaiCompleteness ?? 0) > 0 || Boolean(manual) || Boolean(latest.modelId);
+              if (hasAnyMetadata) { skipped += 1; continue; }
+            }
+            if (!force && complete && !manual) { skipped += 1; continue; }
 
             set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, civitaiStatus: 'idle' } : x) } as any));
-            const result = await civitaiService.fetchMetadata(item.name, target.type, { sha256: item.sha256, blake3: item.blake3, crc32: item.crc32, autoV1: item.autoV1, autoV2: item.autoV2, autoV3: item.autoV3, hash: item.hash, modelId: item.modelId, versionId: item.versionId });
+            const result = await civitaiService.fetchMetadata(item.name, target.type, { sha256: latest.sha256, blake3: latest.blake3, crc32: latest.crc32, autoV1: latest.autoV1, autoV2: latest.autoV2, autoV3: latest.autoV3, hash: latest.hash, modelId: latest.modelId, versionId: latest.versionId }, { force });
             if (result) {
+              resolved += 1;
               const completeness = result.completeness ?? 0;
-              set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, previewUrl: result.previewUrl || x.previewUrl, previewUrls: result.previewUrls?.length ? result.previewUrls : x.previewUrls, triggerWords: result.triggerWords || x.triggerWords, description: result.description || x.description, baseModel: result.baseModel || x.baseModel, modelName: result.modelName || x.modelName, versionName: result.versionName || x.versionName, modelId: result.modelId || x.modelId, versionId: result.versionId || x.versionId, fileName: result.fileName || x.fileName, civitaiMatchedBy: result.matchedBy, civitaiConfidence: result.confidence, civitaiCompleteness: completeness, civitaiStatus: completeness >= 100 ? 'matched' : 'partial', civitaiUrl: manual || result.civitaiUrl || x.civitaiUrl } : x) } as any));
+              set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, previewUrl: result.previewUrl || x.previewUrl, previewUrls: result.previewUrls?.length ? result.previewUrls : x.previewUrls, triggerWords: result.triggerWords || x.triggerWords, description: result.description || x.description, baseModel: result.baseModel || x.baseModel, modelName: result.modelName || x.modelName, versionName: result.versionName || x.versionName, modelId: result.modelId || x.modelId, versionId: result.versionId || x.versionId, fileName: result.fileName || x.fileName, civitaiMatchedBy: result.matchedBy, civitaiConfidence: result.confidence, civitaiCompleteness: completeness, civitaiStatus: completeness >= 100 ? 'matched' : 'partial', civitaiError: undefined, civitaiUrl: manual || result.civitaiUrl || x.civitaiUrl } : x) } as any));
             } else {
-              const failure = civitaiService.getUnresolvedEntries().find((f: any) => f.filename === item.name && f.type === target.type);
-              set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, civitaiStatus: failure?.reason ? 'unresolved' : 'not_found' } : x) } as any));
+              failed += 1;
+              const failure = civitaiService.getFailure(item.name, target.type);
+              const status = failure ? (failure.status === 'temporarily_failed' ? 'temporarily_failed' : 'unresolved') : 'not_found';
+              set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, civitaiStatus: status, civitaiError: failure?.failureReason || failure?.reason } : x) } as any));
             }
             // Yield between requests so the rest of the UI remains responsive.
             await new Promise((resolve) => setTimeout(resolve, 20));
           }
         }
+
+        const where = nameSet ? ` for ${total} selected` : folder === 'all' ? '' : ` in ${folder === '/' ? 'root folder' : folder}`;
+        emitToast(`Civitai sync${where}: ${resolved} resolved, ${failed} unresolved${skipped ? `, ${skipped} ${options.mode === 'missing' ? 'already had metadata' : 'already complete'}` : ''}.`, failed ? 'warning' : 'success');
+      },
+
+      loadMoreCivitaiPreviews: async (type, name) => {
+        const urls = await civitaiService.loadMorePreviews(name, type);
+        if (!urls?.length) return 0;
+        const key = type === 'model' ? 'modelsList' : type === 'lora' ? 'lorasList' : 'embeddingsList';
+        set((s) => ({ [key]: s[key].map((x) => x.name === name ? { ...x, previewUrls: urls, previewUrl: x.previewUrl || urls[0] } : x) } as any));
+        return urls.length;
+      },
+
+      checkCivitaiUpdates: async (category: string, onProgress: (current: number, total: number, name: string) => void, options: { folder?: string; names?: string[] } = {}) => {
+        const state = get();
+        const folder = (options.folder || 'all').replace(/\\/g, '/');
+        const nameSet = options.names ? new Set(options.names) : null;
+        const inScope = (name: string) => {
+          if (nameSet) return nameSet.has(name);
+          if (folder === 'all') return true;
+          const normalized = name.replace(/\\/g, '/');
+          if (folder === '/') return !normalized.includes('/');
+          return normalized.startsWith(`${folder}/`);
+        };
+        const targets: { listName: 'modelsList' | 'lorasList' | 'embeddingsList'; type: CivitaiAssetType; items: ModelItem[] }[] = [];
+        if (category === 'all' || category === 'models') targets.push({ listName: 'modelsList', type: 'model', items: state.modelsList.filter((i) => inScope(i.name)) });
+        if (category === 'all' || category === 'loras') targets.push({ listName: 'lorasList', type: 'lora', items: state.lorasList.filter((i) => inScope(i.name)) });
+        if (category === 'all' || category === 'embeddings') targets.push({ listName: 'embeddingsList', type: 'embedding', items: state.embeddingsList.filter((i) => inScope(i.name)) });
+        const total = targets.reduce((n, t) => n + t.items.length, 0);
+        const summary = { updates: 0, current: 0, unknown: 0, skipped: 0 };
+        if (!total) return summary;
+        let processed = 0;
+
+        for (const target of targets) {
+          for (const item of target.items) {
+            processed += 1;
+            onProgress?.(processed, total, item.name);
+            // Only assets already linked to a Civitai model/version can be compared.
+            const latest = (get()[target.listName] as ModelItem[]).find((x) => x.name === item.name) || item;
+            if (!latest.modelId || !latest.versionId) { summary.skipped += 1; continue; }
+            const outcome = await civitaiService.checkForUpdate(item.name, target.type, latest.modelId, latest.versionId, latest.baseModel);
+            if (outcome.status === 'unknown') { summary.unknown += 1; continue; }
+            if (outcome.status === 'update') summary.updates += 1; else summary.current += 1;
+            set((s) => ({ [target.listName]: s[target.listName].map((x) => x.name === item.name ? { ...x, civitaiUpdate: outcome.info } : x) } as any));
+          }
+        }
+
+        const parts = [`${summary.updates} update${summary.updates === 1 ? '' : 's'} available`, `${summary.current} up to date`];
+        if (summary.unknown) parts.push(`${summary.unknown} could not be checked`);
+        if (summary.skipped) parts.push(`${summary.skipped} skipped (no Civitai metadata yet)`);
+        emitToast(`Update check: ${parts.join(', ')}.`, summary.updates ? 'success' : summary.unknown ? 'warning' : 'info');
+        return summary;
       },
 
       setGenerationViewerItem: (generationViewerItem) => set({ generationViewerItem }),
@@ -1779,8 +1890,12 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
         const key = type === 'model' ? 'modelsList' : type === 'lora' ? 'lorasList' : 'embeddingsList';
         const item = (get()[key] as ModelItem[]).find((x) => x.name === name);
         if (!item) return;
-        const result = await civitaiService.fetchMetadata(name, type, { sha256: item.sha256, blake3: item.blake3, crc32: item.crc32, autoV1: item.autoV1, autoV2: item.autoV2, autoV3: item.autoV3, hash: item.hash, modelId: item.modelId, versionId: item.versionId });
-        if (!result) return;
+        const result = await civitaiService.fetchMetadata(name, type, { sha256: item.sha256, blake3: item.blake3, crc32: item.crc32, autoV1: item.autoV1, autoV2: item.autoV2, autoV3: item.autoV3, hash: item.hash, modelId: item.modelId, versionId: item.versionId }, { force: true });
+        if (!result) {
+          const failure = civitaiService.getFailure(name, type);
+          set((s) => ({ [key]: s[key].map((x) => x.name === name ? { ...x, civitaiStatus: failure?.status === 'temporarily_failed' ? 'temporarily_failed' : 'unresolved', civitaiError: failure?.failureReason || failure?.reason } : x) } as any));
+          return;
+        }
         set((s) => ({ [key]: s[key].map((x) => x.name === name ? { ...x, previewUrl: result.previewUrl || x.previewUrl, previewUrls: result.previewUrls || x.previewUrls, triggerWords: result.triggerWords || x.triggerWords, description: result.description || x.description, baseModel: result.baseModel || x.baseModel, modelName: result.modelName || x.modelName, versionName: result.versionName || x.versionName, modelId: result.modelId || x.modelId, versionId: result.versionId || x.versionId, civitaiMatchedBy: result.matchedBy, civitaiConfidence: result.confidence, civitaiCompleteness: result.completeness || 0, civitaiStatus: (result.completeness || 0) >= 100 ? 'matched' : 'partial', civitaiUrl: civitaiService.getCivitaiUrl(name, type) || x.civitaiUrl } : x) } as any));
       },
       markModelUsed: (type, name) => set((s) => {
@@ -1868,6 +1983,20 @@ const createAppStore: StateCreator<AppState> = (set, get) => ({
         set((s) => ({
           aDetailerUnits: s.aDetailerUnits.map((u) => (u.id === id ? { ...u, ...updates } : u)),
         })),
+
+      addADetailerPass: () => {
+        const units = get().aDetailerUnits;
+        const nextId = String(units.reduce((max, u) => Math.max(max, Number(u.id) || 0), 0) + 1);
+        const latest = units[units.length - 1];
+        const fresh: ADetailerUnit = latest
+          ? { ...latest, id: nextId, enabled: false }
+          : { id: nextId, enabled: false, model: 'face_yolov8n.pt', confidence: 0.7, denoiseStrength: 0.3, steps: 16, maskGrow: 4, maskBlur: 4, maskOversize: 10, sortOrder: 'largest-smallest', saveMask: false, prompt: '', negativePrompt: '' };
+        set({ aDetailerUnits: [...units, fresh] });
+        return nextId;
+      },
+
+      removeADetailerPass: (id) =>
+        set((s) => (s.aDetailerUnits.length <= 1 ? s : { aDetailerUnits: s.aDetailerUnits.filter((u) => u.id !== id) })),
 
       updateSettings: (updates) =>
         set((s) => ({ settings: { ...s.settings, ...updates } })),
@@ -1982,9 +2111,15 @@ export const useAppStore = create<AppState>()(
         const savedTextEncoders = Array.isArray(next.textEncodersList) ? next.textEncodersList.map((value: unknown) => String(value)) : [];
         next.textEncodersList = Array.from(new Set(['Automatic', 'None', 'qwen_3_06b_base.safetensors', 'qwen35_4b.safetensors', ...savedTextEncoders]));
         if (next.settings.uiTheme === 'cyber_black' || next.settings.uiTheme == null) {
-          next.settings.uiTheme = 'obsidian';
+          next.settings.uiTheme = 'hive';
         } else if (next.settings.uiTheme === 'classic') {
           next.settings.uiTheme = 'paper';
+        }
+        if (!next.settings.hiveThemeOffered) {
+          // The Hive theme replaced Obsidian as the default. People still on the old default move over once;
+          // anyone who picked another theme keeps it, and Obsidian stays available in Settings.
+          if (next.settings.uiTheme === 'obsidian') next.settings.uiTheme = 'hive';
+          next.settings.hiveThemeOffered = true;
         }
         if (next.settings.gallerySource === 'app') next.settings.gallerySource = 'session';
         if (next.settings.gallerySource === 'all') next.settings.gallerySource = 'outputs';

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   ArrowDown,
   ArrowUp,
@@ -7,6 +8,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
   Dices,
   Download,
@@ -28,14 +30,16 @@ import {
   X,
 } from 'lucide-react';
 import { emitToast } from '../utils/toast';
+import { PromptAutocompleteTextarea } from './PromptAutocompleteTextarea';
 import { danbooru, type BuilderGroup, type BuilderHealth, type BuilderTagResult, type RemoteTag } from '../api/danbooruService';
-import { BUILDER_TAXONOMIES, type BuilderFilter, type BuilderTaxonomyId, getSemanticPlacements, getPromptFlowPlacements, getPromptRolePlacements } from '../api/promptBuilderTaxonomies';
+import { BUILDER_TAXONOMIES, type BuilderFilter, type BuilderTaxonomyId, getSemanticPlacements, getPromptFlowPlacements, getPromptRolePlacements, getPromptAllInOnePlacements, getPromptAllInOneDefaultPlacements } from '../api/promptBuilderTaxonomies';
 import { classifyTagDetailed } from '../tagging/classifier';
+import promptAllInOneDefaultTaxonomy from '../data/promptAllInOneDefaultTaxonomy.json';
 import { PROMPT_BUILDER_TAG_COUNT, SECTIONS, type PromptBuilderSection, type PromptBuilderTag } from '../data_animaPromptLibrary';
 
 type BuilderTarget = 'positive' | 'negative';
 type BuilderMode = 'add' | 'replace';
-type SourceMode = 'curated' | 'local' | 'internet' | 'hybrid';
+type SourceMode = 'curated' | 'local' | 'internet' | 'hybrid' | 'default_yaml';
 type ViewMode = 'browse' | 'build';
 type SortMode = 'alphabetical' | 'popularity';
 type OrderMode = 'manual' | 'anima' | 'semantic' | 'taxonomy';
@@ -51,6 +55,7 @@ type SavedRecipe = {
 };
 
 type RemoteTagEnriched = RemoteTag & { localDetail?: Partial<BuilderTagResult> };
+type TagContextMenuState = { tag: DisplayTag; x: number; y: number } | null;
 
 type BuilderTreeSub = { sub: string; count: number; countKnown?: boolean; leaves: Array<{ leaf: string; count: number }> };
 type BuilderTreeParent = { parent: string; label: string; hint: string; count: number; countKnown?: boolean; subs: BuilderTreeSub[] };
@@ -64,7 +69,7 @@ type DisplayTag = PromptBuilderTag & {
   classificationConfidence?: number;
   classificationSources?: string[];
   isNsfw?: boolean;
-  origin?: 'curated' | 'local' | 'internet';
+  origin?: 'curated' | 'local' | 'internet' | 'default_yaml';
 };
 
 type InspectorDetail = DisplayTag & {
@@ -85,6 +90,13 @@ const SCALE_KEY = 'swarm_prompt_builder_scale_v3';
 const BUILDER_SCALE_MIN = 90;
 const BUILDER_SCALE_MAX = 110;
 const BUILDER_SCALE_DEFAULT = 100;
+
+function readSavedPanelHeight(key: string, fallback: number, min: number, max: number) {
+  try {
+    const value = Number(localStorage.getItem(key));
+    return Number.isFinite(value) && value > 0 ? Math.max(min, Math.min(max, Math.round(value))) : fallback;
+  } catch { return fallback; }
+}
 
 function readBuilderScale() {
   try {
@@ -131,31 +143,67 @@ type ProfileKey = keyof typeof ANIMA_NOTES;
 
 const SOURCE_OPTIONS: Array<{ id: SourceMode; label: string; description: string }> = [
   { id: 'curated', label: 'Curated Anima', description: 'Hand-organized Anima-oriented library.' },
+  { id: 'default_yaml', label: 'Prompt All in One · default.yaml', description: 'The exact groups and curated tag placements from your supplied SD WebUI Prompt All in One default.yaml.' },
   { id: 'local', label: 'Local database', description: 'The full bundled Danbooru-derived database and taxonomy index.' },
   { id: 'internet', label: 'Internet / Danbooru', description: 'Live Danbooru native index, sampled on demand and categorized locally into an Anima-friendly taxonomy.' },
   { id: 'hybrid', label: 'Combined', description: 'Curated tags + local database matches in one view.' },
 ];
 
-function remoteGroupForTag(tag: RemoteTag): { parent: string; sub: string; leaf?: string } {
-  const result = classifyTagDetailed(tag.name, tag.categoryName, String(tag.category), null, tag.postCount, null);
+type DefaultYamlGroupData = { name: string; color?: string | null; tags: string[] };
+type DefaultYamlParentData = { name: string; groups: DefaultYamlGroupData[] };
+type DefaultYamlData = { source?: string; parents: DefaultYamlParentData[] };
+const DEFAULT_YAML_DATA = promptAllInOneDefaultTaxonomy as DefaultYamlData;
+
+// The uploaded extension file is a library, not merely a classification option.
+// Preserve its ordering and all of its curated placements, including intentional duplicates.
+const DEFAULT_YAML_LIBRARY_TAGS: DisplayTag[] = DEFAULT_YAML_DATA.parents.flatMap((parent, parentIndex) =>
+  parent.groups.flatMap((group, groupIndex) => group.tags.map((label, tagIndex) => {
+    const detail = classifyTagDetailed(label, 'General', '0', null, null, null);
+    return {
+      id: `default-yaml:${parentIndex}:${groupIndex}:${tagIndex}`,
+      label,
+      section: group.name,
+      path: [parent.name, group.name],
+      isNsfw: detail.isNsfw,
+      classificationConfidence: detail.confidence,
+      classificationSources: ['Prompt All in One default.yaml'],
+      origin: 'default_yaml' as const,
+    };
+  })),
+);
+
+function remoteGroupForTag(tag: RemoteTag, taxonomy: BuilderTaxonomyId = 'danbooru_groups'): { parent: string; sub: string; leaf?: string } {
+  const nativeLabel = tag.categoryName === 'artist' ? 'Artist' : tag.categoryName === 'copyright' ? 'Copyright' : tag.categoryName === 'character' ? 'Character' : tag.categoryName === 'meta' ? 'Meta' : 'General';
+  const result = classifyTagDetailed(tag.name, nativeLabel, String(tag.category), null, tag.postCount, null);
+  const record = { tag: tag.name, nativeCategory: nativeLabel, nativeCategoryCode: String(tag.category), wikiCategory: null, isNsfw: result.isNsfw, uiCategory: result.primary.parent, uiSubCategory: result.primary.sub, classificationSources: result.sources, classificationConfidence: result.confidence, aliases: [] as string[] };
+  if (taxonomy === 'semantic') return getSemanticPlacements(record)[0] || { parent: 'Concepts & Lore', sub: 'General concepts' };
+  if (taxonomy === 'prompt_flow') return getPromptFlowPlacements(record)[0] || { parent: 'Image', sub: 'Other concepts' };
+  if (taxonomy === 'anima_roles') return getPromptRolePlacements(record)[0] || { parent: 'Character', sub: 'General' };
+  if (taxonomy === 'prompt_all_in_one') return getPromptAllInOnePlacements(record)[0] || { parent: 'Image', sub: 'Art style' };
+  if (taxonomy === 'prompt_all_in_one_default') return getPromptAllInOneDefaultPlacements(record)[0] || { parent: 'Image', sub: 'Quality' };
+  if (taxonomy === 'danbooru_types') return { parent: nativeLabel, sub: tag.isDeprecated ? 'Deprecated' : 'Tags' };
+
+  // Danbooru Wiki Groups: route General tags locally and retain named native
+  // categories as metadata instead of asking Danbooru to understand our taxonomy.
   if (tag.categoryName === 'artist') return { parent: 'Native Categories', sub: 'Artist' };
   if (tag.categoryName === 'copyright') return { parent: 'Video Games', sub: 'Copyright / Series' };
   if (tag.categoryName === 'character') return { parent: 'Video Games', sub: 'Characters' };
   if (tag.categoryName === 'meta') return { parent: 'Quality & Meta', sub: 'Danbooru Metadata' };
-  const placements = getSemanticPlacements({ tag: tag.name, nativeCategory: 'General', nativeCategoryCode: '0', wikiCategory: null, isNsfw: result.isNsfw });
+  const placements = getSemanticPlacements({ ...record, nativeCategory: 'General', nativeCategoryCode: '0' });
   const parentMap: Record<string, string> = {
-    Subject: 'Society & Culture', Appearance: 'Face & Hair', Attributes: 'Body & Anatomy', Clothing: 'Attire & Clothing',
+    Subject: 'Society & Culture', Appearance: 'Face & Hair', Attributes: 'Body & Anatomy', Body: 'Body & Anatomy', Clothing: 'Attire & Clothing',
     Actions: 'Poses & Actions', Pose: 'Poses & Actions', Interaction: 'Poses & Actions', Composition: 'Composition & Style',
     Camera: 'Composition & Style', Environment: 'Locations & Scenery', Scene: 'Locations & Scenery', Objects: 'Society & Culture',
-    Style: 'Composition & Style', Concepts: 'Text & Lore', Technical: 'Quality & Meta', 'NSFW & Adult': 'Sex & Erotica',
+    Style: 'Composition & Style', 'Concepts & Lore': 'Text & Lore', Concepts: 'Text & Lore', Technical: 'Quality & Meta', 'NSFW & Adult': 'Sex & Erotica',
   };
   const mapped = placements.map((p) => ({ parent: parentMap[p.parent] || 'Society & Culture', sub: p.sub || 'General', leaf: p.leaf }));
-  // Prefer a placement that belongs to a concrete Anima group; fall back to the first semantic placement.
   return mapped.find((p) => p.parent !== 'Society & Culture') || mapped[0] || { parent: 'Society & Culture', sub: 'General' };
 }
 
 const SOURCE_ORDER: Record<BuilderTaxonomyId, string[]> = {
   prompt_flow: ['Person', 'Apparel', 'Facial expression and action', 'Image', 'Environment', 'Scene', 'Items', 'Camera', 'Hanfu', 'NSFW & Adult', 'Negative Prompt'],
+  prompt_all_in_one: ['Person', 'Apparel', 'Facial expression and action', 'Image', 'Environment', 'Scene', 'Items', 'Camera', 'Hanfu', 'Negative Prompt'],
+  prompt_all_in_one_default: ['Person', 'Apparel', 'Facial expression and action', 'Image', 'Environment', 'Scene', 'Items', 'Camera', 'Hanfu', 'Negative Prompt'],
   semantic: ['Subject', 'Appearance', 'Attributes', 'Clothing', 'Actions', 'Pose', 'Interaction', 'Composition', 'Camera', 'Environment', 'Scene', 'Objects', 'Style', 'NSFW & Adult', 'Technical', 'General'],
   anima_roles: ['Character', 'Action & Pose', 'Framing', 'Scene', 'Style', 'Adult', 'Technical', 'General'],
   danbooru_types: ['General', 'Character', 'Meta', 'Artist', 'Copyright'],
@@ -241,15 +289,7 @@ function displayFromLocal(tag: BuilderTagResult, path: string[] = []): DisplayTa
 function displayFromRemote(tag: RemoteTag, taxonomy: BuilderTaxonomyId): DisplayTag {
   const result = classifyTagDetailed(tag.name, tag.categoryName, tag.category === 1 ? '1' : tag.category === 3 ? '3' : tag.category === 4 ? '4' : tag.category === 5 ? '5' : '0', null, tag.postCount, null);
   const nativeLabel = tag.categoryName === 'artist' ? 'Artist' : tag.categoryName === 'copyright' ? 'Copyright' : tag.categoryName === 'character' ? 'Character' : tag.categoryName === 'meta' ? 'Meta' : 'General';
-  const placement = taxonomy === 'semantic'
-    ? getSemanticPlacements({ tag: tag.name, nativeCategory: nativeLabel, nativeCategoryCode: String(tag.category), wikiCategory: null, isNsfw: result.isNsfw })[0]
-    : taxonomy === 'anima_roles'
-      ? getPromptRolePlacements({ tag: tag.name, nativeCategory: nativeLabel, nativeCategoryCode: String(tag.category), wikiCategory: null, isNsfw: result.isNsfw })[0]
-      : taxonomy === 'prompt_flow'
-        ? getPromptFlowPlacements({ tag: tag.name, nativeCategory: nativeLabel, nativeCategoryCode: String(tag.category), wikiCategory: null, isNsfw: result.isNsfw })[0]
-        : taxonomy === 'danbooru_groups'
-          ? remoteGroupForTag(tag)
-          : { parent: nativeLabel, sub: tag.isDeprecated ? 'Deprecated' : 'Tags' };
+  const placement = remoteGroupForTag(tag, taxonomy);
   return {
     id: `remote:${tag.id}`,
     label: tag.name,
@@ -263,7 +303,6 @@ function displayFromRemote(tag: RemoteTag, taxonomy: BuilderTaxonomyId): Display
     origin: 'internet',
   };
 }
-
 
 function rawQueryDebounce(value: string): number { return value.trim() ? 180 : 0; }
 export interface PromptBuilderModalProps { open: boolean; onClose: () => void }
@@ -337,10 +376,19 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
   const searchRequestIdRef = useRef(0);
 
   const [builderHealth, setBuilderHealth] = useState<BuilderHealth | null>(null);
-  const [loadingLibrary, setLoadingLibrary] = useState(false);
+  const [loadingLocalGroups, setLoadingLocalGroups] = useState(false);
+  const [loadingLocalTags, setLoadingLocalTags] = useState(false);
+  const [loadingRemoteTags, setLoadingRemoteTags] = useState(false);
+  const [localDatabaseReady, setLocalDatabaseReady] = useState(() => danbooru.isReady());
+  const [localDatabaseLoadError, setLocalDatabaseLoadError] = useState<string | null>(() => danbooru.getInitError());
+  const [topPanelHidden, setTopPanelHidden] = useState(() => { try { return localStorage.getItem('swarm_anima_builder_top_panel_hidden_v1') === '1'; } catch { return false; } });
+  const [compactBottomPanel, setCompactBottomPanel] = useState(() => { try { return localStorage.getItem('swarm_anima_builder_compact_bottom_v1') === '1'; } catch { return false; } });
+  const [inspectorPanelHeight, setInspectorPanelHeight] = useState<number>(() => readSavedPanelHeight('swarm_anima_builder_inspector_height_v1', 190, 100, 420));
+  const [categoryPanelHeight, setCategoryPanelHeight] = useState<number>(() => readSavedPanelHeight('swarm_anima_builder_category_height_v1', 280, 170, 600));
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [inspectedTag, setInspectedTag] = useState<string | null>(null);
   const [inspectedDetail, setInspectedDetail] = useState<InspectorDetail | null>(null);
+  const [tagContextMenu, setTagContextMenu] = useState<TagContextMenuState>(null);
 
   const currentPrompt = target === 'positive' ? builderPositivePrompt : builderNegativePrompt;
   const currentTokens = useMemo(() => tokenize(currentPrompt), [currentPrompt]);
@@ -360,7 +408,39 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
 
   useEffect(() => { try { localStorage.setItem(SCALE_KEY, String(builderScale)); } catch {} }, [builderScale]);
 
-  useEffect(() => { if (source === 'internet' && taxonomy !== 'danbooru_groups') { setTaxonomy('danbooru_groups'); setActivePath('All'); } }, [source, taxonomy]);
+  useEffect(() => { try { localStorage.setItem('swarm_anima_builder_inspector_height_v1', String(inspectorPanelHeight)); } catch {} }, [inspectorPanelHeight]);
+  useEffect(() => { try { localStorage.setItem('swarm_anima_builder_category_height_v1', String(categoryPanelHeight)); } catch {} }, [categoryPanelHeight]);
+  useEffect(() => { try { localStorage.setItem('swarm_anima_builder_top_panel_hidden_v1', topPanelHidden ? '1' : '0'); } catch {} }, [topPanelHidden]);
+  useEffect(() => { try { localStorage.setItem('swarm_anima_builder_compact_bottom_v1', compactBottomPanel ? '1' : '0'); } catch {} }, [compactBottomPanel]);
+
+  useEffect(() => {
+    if (!tagContextMenu) return;
+    const dismiss = (event: MouseEvent) => {
+      if ((event.target as HTMLElement | null)?.closest?.('[data-anima-tag-context-menu]')) return;
+      setTagContextMenu(null);
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setTagContextMenu(null); };
+    const onScroll = () => setTagContextMenu(null);
+    window.addEventListener('mousedown', dismiss);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('mousedown', dismiss);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [tagContextMenu]);
+
+  useEffect(() => {
+    const updateDatabaseState = () => {
+      setLocalDatabaseReady(danbooru.isReady());
+      setLocalDatabaseLoadError(danbooru.getInitError());
+    };
+    updateDatabaseState();
+    return danbooru.onSettled(updateDatabaseState);
+  }, []);
+
+
 
   useEffect(() => {
     try { localStorage.setItem(RECIPES_KEY, JSON.stringify(recipes.filter((r) => r.createdAt !== 0).slice(0, 100))); } catch {}
@@ -382,35 +462,56 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
   useEffect(() => setReplaceReady(mode === 'replace'), [mode, target]);
 
   useEffect(() => {
-    if (source !== 'local' && source !== 'hybrid') return;
+    if (!open) { setLoadingLocalGroups(false); return; }
+    if (source !== 'local' && source !== 'hybrid') { setLoadingLocalGroups(false); setLibraryError(null); return; }
+    if (!localDatabaseReady) {
+      setLoadingLocalGroups(false);
+      if (localDatabaseLoadError) setLibraryError(localDatabaseLoadError);
+      return;
+    }
     let active = true;
-    setLoadingLibrary(true);
+    setLoadingLocalGroups(true);
     setLibraryError(null);
     danbooru.getBuilderGroups(taxonomy, sfwFilter)
       .then((result) => { if (!active) return; setBuilderGroups(result.groups || []); setBuilderTotal(result.totalTags || 0); setBuilderPlacementTotal(result.placementTotal || 0); })
       .catch((error) => { if (active) setLibraryError(error instanceof Error ? error.message : String(error)); })
-      .finally(() => { if (active) setLoadingLibrary(false); });
+      .finally(() => { if (active) setLoadingLocalGroups(false); });
     return () => { active = false; };
-  }, [source, taxonomy, sfwFilter]);
+  }, [open, source, taxonomy, sfwFilter, localDatabaseReady, localDatabaseLoadError]);
 
   useEffect(() => {
-    if (source !== 'local' && source !== 'hybrid') return;
+    if (!open) { setLoadingLocalTags(false); return; }
+    if (source !== 'local' && source !== 'hybrid') { setLoadingLocalTags(false); setLocalTags([]); setLocalPageTotal(0); return; }
+    if (!localDatabaseReady) {
+      setLoadingLocalTags(false);
+      setLocalTags([]);
+      setLocalPageTotal(0);
+      if (localDatabaseLoadError) setLibraryError(localDatabaseLoadError);
+      return;
+    }
     const [parent, sub, leaf] = activePath.split('::');
-    if (!parent || parent.startsWith('__')) return;
+    if (!parent || parent.startsWith('__')) {
+      // Favorites and Builder tags are derived views; they do not query the local index.
+      setLoadingLocalTags(false);
+      setLocalTags([]);
+      setLocalPageTotal(0);
+      return;
+    }
     let active = true;
-    setLoadingLibrary(true);
+    setLoadingLocalTags(true);
     setLocalTags([]);
     danbooru.getBuilderTags({ taxonomy, sfwFilter, parent: parent || 'All', sub, leaf, search: query.trim(), sort, page: localPage, limit: LOCAL_PAGE_LIMIT })
       .then((result) => { if (!active) return; setLocalPageTotal(result.total); setLocalTags(result.tags.map((tag) => displayFromLocal(tag, [parent, sub, ...(leaf ? [leaf] : [])]))); })
       .catch((error) => { if (active) { setLocalPageTotal(0); setLocalTags([]); setLibraryError(error instanceof Error ? error.message : String(error)); } })
-      .finally(() => { if (active) setLoadingLibrary(false); });
+      .finally(() => { if (active) setLoadingLocalTags(false); });
     return () => { active = false; };
-  }, [source, taxonomy, sfwFilter, activePath, query, sort, localPage]);
+  }, [open, source, taxonomy, sfwFilter, activePath, query, sort, localPage, localDatabaseReady, localDatabaseLoadError]);
 
   useEffect(() => setLocalPage(1), [source, taxonomy, sfwFilter, activePath, query, sort]);
 
   useEffect(() => {
     if (source !== 'internet') {
+      setLoadingRemoteTags(false);
       setRemoteTags([]);
       setRemotePage(1);
       setRemoteHasMore(false);
@@ -430,6 +531,14 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
         if (sub === 'General') return [0];
         return [0, 1, 3, 4, 5];
       }
+      if (taxonomy === 'prompt_all_in_one' || taxonomy === 'prompt_all_in_one_default' || taxonomy === 'semantic' || taxonomy === 'prompt_flow' || taxonomy === 'anima_roles') return [0, 1, 3, 4, 5];
+      if (taxonomy === 'danbooru_types') {
+        if (parent === 'Artist') return [1];
+        if (parent === 'Copyright') return [3];
+        if (parent === 'Character') return [4];
+        if (parent === 'Meta') return [5];
+        return [0];
+      }
       if (parent === 'Video Games') return [0, 3, 4];
       if (parent === 'Quality & Meta') return [0, 5];
       return [0];
@@ -440,7 +549,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
         const nsfw = isNsfwTagForRemote(tag);
         if (sfwFilter !== 'all' && (sfwFilter === 'nsfw') !== nsfw) return false;
         if (remoteSearchMode === 'all' || parent === 'All' || !parent) return true;
-        const placement = remoteGroupForTag(tag);
+        const placement = remoteGroupForTag(tag, taxonomy);
         return placement.parent === parent
           && (!sub || placement.sub === sub)
           && (!leaf || placement.leaf === leaf);
@@ -454,7 +563,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
     };
 
     const timer = window.setTimeout(async () => {
-      setLoadingLibrary(true);
+      setLoadingRemoteTags(true);
       setLibraryError(null);
       try {
         const [activeParent, activeSub, activeLeaf] = activePath.split('::');
@@ -501,7 +610,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
           ]);
           const merged = new Map<number, RemoteTag>();
           liveResult.tags.forEach((tag) => merged.set(tag.id, tag));
-          scanResults.flat().forEach((tag) => merged.set(tag.id, tag));
+          scanResults.flat(2).flatMap((result) => result.tags).forEach((tag) => merged.set(tag.id, tag));
           candidates = [...merged.values()];
           hasMore = liveResult.hasMore;
           totalCount = liveResult.totalCount;
@@ -549,7 +658,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
           setRemoteDiscoveredSubs((prev) => {
             const discovered = new Set(prev[activeParent] || []);
             sorted.forEach((tag) => {
-              const placement = remoteGroupForTag(tag);
+              const placement = remoteGroupForTag(tag, taxonomy);
               if (placement.parent === activeParent && placement.sub) discovered.add(placement.sub);
             });
             return { ...prev, [activeParent]: [...discovered].sort((a, b) => a.localeCompare(b)) };
@@ -572,7 +681,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
           setRemoteHasMore(false);
         }
       } finally {
-        if (active) setLoadingLibrary(false);
+        if (active) setLoadingRemoteTags(false);
       }
     }, rawQueryDebounce(remoteSearchMode === 'all' ? allSearch : categorySearch));
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
@@ -592,7 +701,9 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
     const local = localTags.find((tag) => normalizeToken(tag.label) === normalizeToken(inspectedTag));
     const remote = remoteTags.find((tag) => normalizeToken(tag.name) === normalizeToken(inspectedTag));
     const curated = SECTIONS.flatMap((s) => s.tags).find((tag) => normalizeToken(tag.label) === normalizeToken(inspectedTag));
+    const fromDefaultYaml = DEFAULT_YAML_LIBRARY_TAGS.find((tag) => normalizeToken(tag.label) === normalizeToken(inspectedTag));
     let active = true;
+    if (fromDefaultYaml && source === 'default_yaml') { setInspectedDetail(fromDefaultYaml); return () => { active = false; }; }
     if (curated) { setInspectedDetail(displayFromCurated(curated)); return () => { active = false; }; }
     if (local) {
       danbooru.getTagDetail(local.label, local.path[0], local.path[1])
@@ -617,7 +728,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       setInspectedDetail({ id: `inspect:${inspectedTag}`, label: inspectedTag, section: 'inspect', path: [strict?.parent || 'General', strict?.sub || 'Unclassified', ...(strict?.leaf ? [strict.leaf] : [])], classificationConfidence: result.confidence, classificationSources: result.sources, isNsfw: result.isNsfw });
     }
     return () => { active = false; };
-  }, [inspectedTag, localTags, remoteTags, taxonomy]);
+  }, [inspectedTag, localTags, remoteTags, taxonomy, source]);
 
   const curatedFilteredSections: PromptBuilderSection[] = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -636,6 +747,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       ...SECTIONS.flatMap((section) => section.tags.map(displayFromCurated)),
       ...localTags,
       ...remoteDisplayTags,
+      ...DEFAULT_YAML_LIBRARY_TAGS,
     ];
     const seen = new Set<string>();
     return all.filter((tag) => {
@@ -647,7 +759,23 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
     });
   }, [favorites, favoriteFolders, favoriteFolderFilter, localTags, remoteDisplayTags]);
 
-  const dynamicTags = source === 'internet' ? remoteDisplayTags : localTags;
+  const defaultYamlFilteredTags = useMemo(() => DEFAULT_YAML_LIBRARY_TAGS.filter((tag) => sfwFilter === 'all' || (sfwFilter === 'nsfw') === Boolean(tag.isNsfw)), [sfwFilter]);
+  const defaultYamlMatchedTags = useMemo<DisplayTag[]>(() => {
+    if (source !== 'default_yaml') return [];
+    const q = query.trim().toLowerCase();
+    const [parent, sub, leaf] = activePath.split('::');
+    const matches = defaultYamlFilteredTags.filter((tag) => {
+      if (activePath !== 'All' && activePath && !activePath.startsWith('__')) {
+        if (tag.path[0] !== parent || (sub && tag.path[1] !== sub) || (leaf && tag.path[2] !== leaf)) return false;
+      }
+      const haystack = `${tag.label} ${tag.path.join(' ')}`.toLowerCase();
+      return !q || haystack.includes(q) || haystack.replace(/[_-]+/g, ' ').includes(q.replace(/[_-]+/g, ' '));
+    });
+    if (sort === 'alphabetical') matches.sort((a, b) => a.label.localeCompare(b.label));
+    return matches;
+  }, [source, defaultYamlFilteredTags, activePath, query, sort]);
+  const defaultYamlPageTags = useMemo<DisplayTag[]>(() => defaultYamlMatchedTags.slice((localPage - 1) * LOCAL_PAGE_LIMIT, localPage * LOCAL_PAGE_LIMIT), [defaultYamlMatchedTags, localPage]);
+  const dynamicTags = source === 'internet' ? remoteDisplayTags : source === 'default_yaml' ? defaultYamlPageTags : localTags;
   const mergedHybridTags = useMemo(() => {
     if (source !== 'hybrid') return dynamicTags;
     const curated = curatedFilteredSections.flatMap((s) => s.tags.map(displayFromCurated));
@@ -673,6 +801,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       if (!parts.length || parts[0] === '') return section.tags.map(displayFromCurated);
       return section.tags.filter((tag) => parts.every((part, index) => tag.path[index] === part)).map(displayFromCurated);
     }
+    if (source === 'default_yaml') return defaultYamlPageTags;
     if (source === 'hybrid') {
       if (activePath === 'All' || !activePath) return mergedHybridTags;
       const [parent, sub, leaf] = activePath.split('::');
@@ -684,22 +813,40 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       return dynamicTags.filter((tag) => tag.path[0] === parent && (!sub || tag.path[1] === sub) && (!leaf || tag.path[2] === leaf));
     }
     return dynamicTags;
-  }, [viewMode, activePath, favoriteTags, currentTokens, source, curatedFilteredSections, dynamicTags, mergedHybridTags, remoteSearchMode]);
+  }, [viewMode, activePath, favoriteTags, currentTokens, source, curatedFilteredSections, dynamicTags, mergedHybridTags, remoteSearchMode, defaultYamlPageTags]);
 
   const groupTree = useMemo<BuilderTreeParent[]>(() => {
     if (source === 'curated') {
       return curatedFilteredSections.map((section) => ({ parent: section.id, label: section.label, hint: section.hint, count: section.tags.length, subs: buildCuratedTree(section.tags) }));
+    }
+    if (source === 'default_yaml') {
+      return DEFAULT_YAML_DATA.parents.map((parent) => {
+        const parentTags = defaultYamlFilteredTags.filter((tag) => tag.path[0] === parent.name);
+        return {
+          parent: parent.name,
+          label: parent.name,
+          hint: 'Directly from Prompt All in One default.yaml.',
+          count: parentTags.length,
+          countKnown: true,
+          subs: parent.groups.map((group) => ({
+            sub: group.name,
+            count: parentTags.filter((tag) => tag.path[1] === group.name).length,
+            countKnown: true,
+            leaves: [],
+          })),
+        } as BuilderTreeParent;
+      });
     }
     if (source === 'internet') {
       // Internet categories must be stable. Do not derive the navigation tree from
       // the current result page: doing so makes categories disappear whenever the
       // selected category/search returns no matching tags. Counts are only hints;
       // the category itself always remains available for the next remote query.
-      const order = SOURCE_ORDER.danbooru_groups;
+      const order = SOURCE_ORDER[taxonomy];
       const categoryCounts = new Map<string, number>();
       const subCounts = new Map<string, Map<string, number>>();
       for (const tag of remoteDisplayTags) {
-        const parent = tag.path[0] || 'Society & Culture';
+        const parent = tag.path[0] || order[0] || 'Image';
         const sub = tag.path[1] || 'General';
         categoryCounts.set(parent, (categoryCounts.get(parent) || 0) + 1);
         const subs = subCounts.get(parent) || new Map<string, number>();
@@ -711,10 +858,11 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
         const subs = new Map<string, number>(discovered.map((sub) => [sub, 0]));
         for (const [sub, count] of subCounts.get(parent) || []) subs.set(sub, Math.max(subs.get(sub) || 0, count));
         if (parent === 'Native Categories' && !subs.size) subs.set('General', 0);
+        if ((taxonomy === 'prompt_all_in_one' || taxonomy === 'prompt_all_in_one_default') && parent === 'Negative Prompt' && !subs.size) subs.set('Image', 0);
         return {
           parent,
           label: parent,
-          hint: 'Live tags are sampled from Danbooru native index pages, then classified locally.',
+          hint: `Live Danbooru tags classified locally using ${BUILDER_TAXONOMIES.find((item) => item.id === taxonomy)?.label || taxonomy}.`,
           count: categoryCounts.get(parent) || 0,
           countKnown: false,
           subs: [...subs.entries()].map(([sub, count]) => ({ sub, count, countKnown: false, leaves: [] })),
@@ -733,7 +881,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       map.set(group.parent, entry);
     }
     return [...map.values()].sort((a, b) => (order.indexOf(a.parent) < 0 ? 999 : order.indexOf(a.parent)) - (order.indexOf(b.parent) < 0 ? 999 : order.indexOf(b.parent)) || a.parent.localeCompare(b.parent)).map((entry) => ({ ...entry, subs: entry.subs.sort((a, b) => b.count - a.count || a.sub.localeCompare(b.sub)) }));
-  }, [source, curatedFilteredSections, remoteDisplayTags, builderGroups, taxonomy, remoteDiscoveredSubs]);
+  }, [source, curatedFilteredSections, remoteDisplayTags, builderGroups, taxonomy, remoteDiscoveredSubs, defaultYamlFilteredTags]);
 
   const currentDiagnostics = useMemo(() => findPromptDiagnostics(currentTokens), [currentTokens]);
   const suggestions = useMemo(() => getSuggestions(currentTokens, activeTags), [currentTokens, activeTags]);
@@ -761,6 +909,17 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
 
     const timer = window.setTimeout(async () => {
       try {
+        if (source === 'default_yaml') {
+          const [parent, sub, leaf] = activePath.split('::');
+          const suggestions = defaultYamlFilteredTags.filter((tag) => {
+            const haystack = `${tag.label} ${tag.path.join(' ')}`.toLowerCase();
+            if (!haystack.includes(trimmed.toLowerCase()) && !haystack.replace(/[_-]+/g, ' ').includes(trimmed.toLowerCase().replace(/[_-]+/g, ' '))) return false;
+            if (activePath !== 'All' && activePath && !activePath.startsWith('__')) return tag.path[0] === parent && (!sub || tag.path[1] === sub) && (!leaf || tag.path[2] === leaf);
+            return true;
+          }).slice(0, 12).map((tag) => ({ label: tag.label, category: tag.path.join(' / '), origin: 'default_yaml' as const }));
+          if (requestId === searchRequestIdRef.current) setSearchSuggestions(suggestions);
+          return;
+        }
         if (source === 'internet') {
           const results = await danbooru.searchRemoteTagAutocomplete(trimmed, 50);
           if (requestId !== searchRequestIdRef.current) return;
@@ -768,7 +927,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
           const filtered = results.filter((tag) => {
             if (sfwFilter !== 'all' && (sfwFilter === 'nsfw') !== isNsfwTagForRemote(tag)) return false;
             if (field === 'all' || !parent || parent === 'All') return true;
-            const placement = remoteGroupForTag(tag);
+            const placement = remoteGroupForTag(tag, taxonomy);
             return placement.parent === parent && (!sub || placement.sub === sub) && (!leaf || placement.leaf === leaf);
           });
           setSearchSuggestions(filtered.slice(0, 12).map((tag) => ({ label: tag.name, count: tag.postCount, category: tag.categoryName, origin: 'internet' })));
@@ -811,7 +970,7 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
       }
     }, 140);
     return () => window.clearTimeout(timer);
-  }, [open, source, taxonomy, sfwFilter, activePath, query, categorySearch, allSearch, remoteSearchMode]);
+  }, [open, source, taxonomy, sfwFilter, activePath, query, categorySearch, allSearch, remoteSearchMode, defaultYamlFilteredTags]);
 
   const chooseSearchSuggestion = (field: 'primary' | 'all', value: string) => {
     if (source === 'internet') {
@@ -825,6 +984,42 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
   };
 
   if (!open) return null;
+
+  const startBuilderPanelResize = (event: React.MouseEvent<HTMLDivElement>, panel: 'inspector' | 'categories') => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startY = event.clientY;
+    const startHeight = panel === 'inspector' ? inspectorPanelHeight : categoryPanelHeight;
+    const minimum = panel === 'inspector' ? 100 : 170;
+    const maximum = panel === 'inspector'
+      ? Math.max(minimum, Math.min(420, window.innerHeight - categoryPanelHeight - 300))
+      : Math.max(minimum, Math.min(600, window.innerHeight - inspectorPanelHeight - 300));
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    const onMove = (moveEvent: MouseEvent) => {
+      const delta = moveEvent.clientY - startY;
+      const nextHeight = Math.max(minimum, Math.min(maximum, Math.round(startHeight + (panel === 'inspector' ? delta : -delta))));
+      if (panel === 'inspector') setInspectorPanelHeight(nextHeight);
+      else setCategoryPanelHeight(nextHeight);
+    };
+    const onUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const localSourceActive = source === 'local' || source === 'hybrid';
+  const isPreparingLocalDatabase = open && localSourceActive && !localDatabaseReady && !localDatabaseLoadError;
+  const isLoadingLibraryView = source === 'internet'
+    ? loadingRemoteTags
+    : localSourceActive && (isPreparingLocalDatabase || loadingLocalGroups || loadingLocalTags);
+  const libraryLoadingLabel = source === 'internet'
+    ? 'Searching Danbooru…'
+    : isPreparingLocalDatabase ? 'Preparing local database…' : loadingLocalTags ? 'Querying local database…' : 'Loading local categories…';
 
   const sectionRank = (tag: string) => {
     const normalized = normalizeToken(tag);
@@ -998,7 +1193,23 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
     if (parent && sub) setExpandedSubs((prev) => new Set(prev).add(`${parent}::${sub}`));
   };
 
-  const inspect = (tag: DisplayTag) => { setInspectedTag(tag.label); setShowInspector(true); };
+  const inspect = (tag: DisplayTag) => { setInspectedTag(tag.label); setShowInspector(true); setTopPanelHidden(false); };
+  const openTagInBrowser = async (tag: DisplayTag) => {
+    const sourceUrl = tag.origin === 'default_yaml'
+      ? 'https://github.com/Physton/sd-webui-prompt-all-in-one/blob/main/group_tags/default.yaml'
+      : danbooru.getRemoteTagUrl(tag.label);
+    try {
+      if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) await openUrl(sourceUrl);
+      else window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+    } catch {
+      window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+  const showTagContextMenu = (tag: DisplayTag, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setTagContextMenu({ tag, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 238)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 238)) });
+  };
   const browseRelated = () => {
     if (!inspectedDetail) return;
     setViewMode('browse');
@@ -1019,11 +1230,43 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
     setFavorites((prev) => { const next = new Set(prev); next.add(key); return next; });
   };
 
-  const maxLocalPage = Math.max(1, Math.ceil(localPageTotal / LOCAL_PAGE_LIMIT));
-    const libraryCountLabel = source === 'curated' ? `${PROMPT_BUILDER_TAG_COUNT.toLocaleString()} curated` : source === 'internet' ? `${remoteTags.length.toLocaleString()} shown · ${remoteTotalCount !== null ? `${remoteTotalCount.toLocaleString()} matching online` : 'live index'}` : `${builderTotal.toLocaleString()} local tags · ${builderPlacementTotal.toLocaleString()} placements`;
+  const localPageTotalForDisplay = source === 'default_yaml' ? defaultYamlMatchedTags.length : localPageTotal;
+  const maxLocalPage = Math.max(1, Math.ceil(localPageTotalForDisplay / LOCAL_PAGE_LIMIT));
+    const libraryCountLabel = source === 'curated' ? `${PROMPT_BUILDER_TAG_COUNT.toLocaleString()} curated` : source === 'default_yaml' ? `${new Set(DEFAULT_YAML_LIBRARY_TAGS.map((tag) => tag.label.trim())).size.toLocaleString()} YAML tags · ${DEFAULT_YAML_LIBRARY_TAGS.length.toLocaleString()} placements` : source === 'internet' ? `${remoteTags.length.toLocaleString()} shown · ${remoteTotalCount !== null ? `${remoteTotalCount.toLocaleString()} matching online` : 'live index'}` : `${builderTotal.toLocaleString()} local tags · ${builderPlacementTotal.toLocaleString()} placements`;
+
+  const renderTagLibraryBrowser = () => (
+    <>
+      {isLoadingLibraryView && <div className="mb-2 flex items-center gap-2 rounded-lg border border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] px-3 py-2 text-[12px] text-[var(--sc-text-dim)]"><RefreshCw className="h-3 w-3 animate-spin" /> {libraryLoadingLabel}</div>}
+      {libraryError && <div className="mb-2 rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger-soft)] p-2 text-[11px] text-[var(--sc-danger)]">{libraryError}</div>}
+                      {source === 'internet' && <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] px-3 py-2 text-[11px]"><span className="text-[var(--sc-text-muted)]">Live Danbooru · category-aware, on-demand search.</span><a className="inline-flex items-center gap-1 text-[var(--sc-info)] hover:underline" href="https://danbooru.donmai.us/" target="_blank" rel="noreferrer">Open Danbooru <ExternalLink className="h-3 w-3" /></a></div>}
+      
+                      <section className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]">
+                        {source === 'internet' && <div className="border-b border-[var(--sc-border-soft)] p-3"><div className="relative"><Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-[var(--sc-text-dim)]" /><input value={allSearch} onFocus={() => setSearchSuggestionField('all')} onChange={(e) => { setRemoteSearchMode('all'); setAllSearch(e.target.value); setCategorySearch(''); setRemotePage(1); }} placeholder="Search all Danbooru tags…" className="sc-theme-input h-9 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] pl-9 pr-2 text-[13px] outline-none" />{searchSuggestionField === 'all' && searchSuggestions.length > 0 && <SearchSuggestions items={searchSuggestions} onSelect={(value) => chooseSearchSuggestion('all', value)} />}</div><div className="mt-1 text-[10px] text-[var(--sc-text-dim)]">Searches the live Danbooru index independently of the selected category. Suggestions use the same session cache as tag browsing.</div></div>}
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--sc-border-soft)] px-3 py-2.5"><div><div className="text-[13px] font-semibold">{activePath === '__favorites__' ? 'Favorite tags' : activePath === '__builder__' ? 'Builder draft tags' : source === 'curated' ? 'Curated Anima tags' : activePath === 'All' ? 'All tags' : activePath.split('::').join(' / ')}</div><div className="text-[11px] text-[var(--sc-text-muted)]">Click a tag to add/remove it from the selected builder draft. The draft boxes above are the only prompt text controlled here. Click the info icon for taxonomy, confidence, aliases, related data and source details.</div></div><div className="flex items-center gap-2"><select value={sort} onChange={(e) => setSort(e.target.value as SortMode)} className="sc-theme-select h-7 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[11px] outline-none"><option value="popularity">Popular</option><option value="alphabetical">A–Z</option></select><span className="rounded-full border border-[var(--sc-border)] px-2 py-0.5 text-[12px] text-[var(--sc-text-dim)]">{activeTags.length} shown</span></div></div>
+                        {activeTags.length === 0 ? <div className="p-10 text-center text-[12px] text-[var(--sc-text-dim)]">{source === 'internet' ? 'No live matches returned.' : 'No tags in this view.'}</div> : <div key={`${source}|${taxonomy}|${activePath}|${query}|${categorySearch}|${allSearch}|${remoteSearchMode}|${localPage}|${remotePage}|${sfwFilter}|${sort}`} className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">{activeTags.map((tag) => <TagCard key={tag.id} tag={tag} selected={selectedSet.has(normalizeToken(tag.label))} favorite={favorites.has(normalizeToken(tag.label))} onToggle={() => toggleTag(tag.label)} onFavorite={() => toggleFavorite(tag)} onInspect={() => inspect(tag)} onContextMenu={(event) => showTagContextMenu(tag, event)} />)}</div>}
+                      </section>
+      
+                      {source !== 'curated' && source !== 'internet' && maxLocalPage > 1 && activePath !== '__favorites__' && activePath !== '__builder__' && <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] p-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Page {localPage} / {maxLocalPage} · {localPageTotalForDisplay.toLocaleString()} matching tags</span><div className="flex gap-1"><button type="button" className="sc-builder-action" disabled={localPage <= 1} onClick={() => setLocalPage((p) => Math.max(1, p - 1))}><ArrowUp className="h-3 w-3 -rotate-90" /> Previous</button><button type="button" className="sc-builder-action" disabled={localPage >= maxLocalPage} onClick={() => setLocalPage((p) => Math.min(maxLocalPage, p + 1))}>Next {LOCAL_PAGE_LIMIT.toLocaleString()} <ArrowDown className="h-3 w-3 -rotate-90" /></button></div></div>}
+                      {source === 'internet' && <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] p-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Page {remotePage}{remoteTotalCount !== null ? ` / ${Math.max(1, Math.ceil(remoteTotalCount / REMOTE_PAGE_LIMIT)).toLocaleString()}` : ''} · {remoteTags.length.toLocaleString()} shown · live index</span><div className="flex gap-1"><button type="button" className="sc-builder-action" disabled={remotePage <= 1} onClick={() => setRemotePage((p) => Math.max(1, p - 1))}><ArrowUp className="h-3 w-3 -rotate-90" /> Previous</button><button type="button" className="sc-builder-action" disabled={!remoteHasMore} onClick={() => setRemotePage((p) => p + 1)}>Next <ArrowDown className="h-3 w-3 -rotate-90" /></button></div></div>}
+      
+                      <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><button type="button" onClick={() => setShowSuggestions((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Context-aware suggestions</span>{showSuggestions ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showSuggestions && <div className="border-t border-[var(--sc-border-soft)] p-2.5"><div className="mb-2 text-[11px] text-[var(--sc-text-muted)]">Non-destructive suggestions inferred from the current tag stack.</div><div className="flex flex-wrap gap-1.5">{suggestions.length ? suggestions.map((tag) => <button key={`suggest-${tag}`} type="button" onClick={() => toggleTag(tag)} className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-[11px] text-[var(--sc-text-secondary)] hover:border-[var(--sc-theme-border)] hover:text-[var(--sc-text)]">+ {tag}</button>) : <span className="text-[12px] text-[var(--sc-text-dim)]">Add a subject, pose, camera or environment tag to unlock suggestions.</span>}</div></div>}</section>
+      
+                      <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><button type="button" onClick={() => setShowRecipePanel((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><BookOpen className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Recipes</span>{showRecipePanel ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showRecipePanel && <div className="border-t border-[var(--sc-border-soft)] p-2"><div className="mb-2 flex items-center gap-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Save folder</span><select value={recipeFolder} onChange={(e) => setRecipeFolder(e.target.value as FavoriteFolder)} className="sc-theme-select h-7 flex-1 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[11px] outline-none">{FAVORITE_FOLDERS.map((folder) => <option key={folder}>{folder}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2">{recipes.map((recipe) => <div key={recipe.id} className={`rounded-lg border p-2 ${activePreset === recipe.id ? 'border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]' : 'border-[var(--sc-border)] bg-[var(--sc-surface-2)]'}`}><div className="flex items-center gap-2"><button type="button" onClick={() => applyRecipe(recipe)} className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold text-[var(--sc-text)]">{recipe.name}</button><span className="rounded-full bg-[var(--sc-surface-3)] px-1.5 py-0.5 text-[10px] text-[var(--sc-text-dim)]">{recipe.folder}</span>{recipe.createdAt !== 0 && <button type="button" onClick={() => deleteRecipe(recipe.id)} className="p-1 text-[var(--sc-text-dim)] hover:text-[var(--sc-danger)]"><Trash2 className="h-3 w-3" /></button>}</div><div className="mt-1 truncate text-[11px] text-[var(--sc-text-muted)]">{recipe.positive}</div></div>)}</div></div>}</section>
+    </>
+  );
 
   return createPortal(
     <div className={`fixed inset-0 z-[100] ${isStandalonePopup ? 'h-screen w-screen overflow-hidden bg-[var(--sc-surface-0)]' : 'flex items-center justify-center p-3'}`} role="dialog" aria-modal="true" aria-label="Anima Prompt Builder">
+      {tagContextMenu && createPortal(
+        <div data-anima-tag-context-menu="true" role="menu" style={{ left: tagContextMenu.x, top: tagContextMenu.y }} className="fixed z-[1000] w-56 rounded-xl border border-[var(--sc-border-strong)] bg-[var(--sc-surface-1)] p-1.5 text-[12px] shadow-2xl">
+          <div className="mb-1 truncate px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--sc-text-dim)]">{tagContextMenu.tag.label}</div>
+          <button type="button" role="menuitem" onClick={() => { toggleTag(tagContextMenu.tag.label); setTagContextMenu(null); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--sc-text)] hover:bg-[var(--sc-surface-2)]"><Plus className="h-3.5 w-3.5" />{selectedSet.has(normalizeToken(tagContextMenu.tag.label)) ? 'Remove from draft' : `Add to ${target} draft`}</button>
+          <button type="button" role="menuitem" onClick={() => { inspect(tagContextMenu.tag); setTagContextMenu(null); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--sc-text)] hover:bg-[var(--sc-surface-2)]"><Info className="h-3.5 w-3.5 text-[var(--sc-info)]" />Inspect tag</button>
+          <button type="button" role="menuitem" onClick={() => { toggleFavorite(tagContextMenu.tag); setTagContextMenu(null); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--sc-text)] hover:bg-[var(--sc-surface-2)]"><Star className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" />{favorites.has(normalizeToken(tagContextMenu.tag.label)) ? 'Remove favorite' : 'Add favorite'}</button>
+          <button type="button" role="menuitem" onClick={() => { void navigator.clipboard?.writeText(tagContextMenu.tag.label).catch(() => {}); setTagContextMenu(null); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--sc-text)] hover:bg-[var(--sc-surface-2)]"><Copy className="h-3.5 w-3.5" />Copy tag</button>
+          <div className="my-1 border-t border-[var(--sc-border-soft)]" />
+          <button type="button" role="menuitem" onClick={() => { void openTagInBrowser(tagContextMenu.tag); setTagContextMenu(null); }} className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--sc-info)] hover:bg-[var(--sc-info-soft)]"><ExternalLink className="h-3.5 w-3.5" />View tag in browser</button>
+        </div>, document.body)}
       {!isStandalonePopup && <div className="absolute inset-0 bg-black/74 backdrop-blur-sm" onClick={onClose} />}
       <div style={{ zoom: `${builderScale}%` }} className={isStandalonePopup ? 'relative flex h-full w-full flex-col overflow-auto bg-[var(--sc-surface-0)] text-[var(--sc-text)]' : 'relative flex h-[min(94vh,1080px)] w-[min(1540px,98vw)] flex-col overflow-auto rounded-2xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)] text-[var(--sc-text)] shadow-[0_24px_100px_rgba(0,0,0,.62)] animate-[sc-pop-in_.18s_ease-out]'}>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -1038,6 +1281,8 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
               <div className="mt-1 text-[12px] text-[var(--sc-text-muted)]">Structured browsing, smart prompt assembly, taxonomy switching and live tag lookup.</div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => setTopPanelHidden((value) => !value)} className="sc-builder-action" title={topPanelHidden ? 'Show the top inspector and tools panel' : 'Hide the top inspector and tools panel'}>{topPanelHidden ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}{topPanelHidden ? 'Show top' : 'Hide top'}</button>
+              <button type="button" onClick={() => setCompactBottomPanel((value) => !value)} className="sc-builder-action" title={compactBottomPanel ? 'Show all bottom-panel controls' : 'Hide bottom-panel controls except search and category navigation'}>{compactBottomPanel ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}{compactBottomPanel ? 'Full bottom' : 'Compact bottom'}</button>
               <select value={profile} onChange={(e) => setProfile(e.target.value as ProfileKey)} className="sc-theme-select h-8 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[13px] outline-none"><option value="base">Qwen 3 0.6B Base</option><option value="qwen35">Qwen 3.5 4B</option></select>
               <div className="flex items-center gap-1.5 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 py-1 sm:flex" title="Prompt Builder UI scale">
                 <span className="text-[12px] font-semibold text-[var(--sc-text-dim)]">UI</span>
@@ -1052,14 +1297,17 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
 
           {showGuide && <div className="shrink-0 border-b border-[var(--sc-border-soft)] bg-[var(--sc-gold-soft)] px-4 py-3 text-[12px] leading-5 text-[var(--sc-text-secondary)]"><div className="flex items-start gap-2"><Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-[var(--sc-gold-strong)]" /><div><strong className="text-[var(--sc-text)]">{ANIMA_NOTES[profile].label}</strong> · {ANIMA_NOTES[profile].note} <span className="text-[var(--sc-text-dim)]">Encoder: {ANIMA_NOTES[profile].file}</span></div></div></div>}
 
-          <div className="min-h-0 min-w-0 flex-1 grid grid-cols-[minmax(270px,320px)_minmax(0,1fr)_minmax(330px,420px)] overflow-hidden">
-            <aside className="min-h-0 min-w-0 overflow-y-auto border-r border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] p-2.5">
+          <div className="min-h-0 min-w-0 flex-1 flex flex-col overflow-hidden">
+            <aside style={{ flex: `0 0 ${categoryPanelHeight}px` }} className="order-5 w-full min-h-0 overflow-hidden border-t border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] p-2.5">
+              <div className="flex h-full min-h-0 gap-2.5">
+                <div className="h-full min-h-0 w-[270px] shrink-0 overflow-y-auto pr-1">
               <section className="sticky top-0 z-20 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]/98 p-2.5 backdrop-blur">
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-[var(--sc-text-dim)]" />
                   <input id="anima-builder-search" value={source === 'internet' ? categorySearch : query} onFocus={() => setSearchSuggestionField('primary')} onChange={(e) => source === 'internet' ? (setRemoteSearchMode('category'), setCategorySearch(e.target.value), setAllSearch('')) : setQuery(e.target.value)} placeholder={source === 'internet' ? 'Search selected category…' : 'Search tags, aliases or concepts…'} className="sc-theme-input h-9 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] pl-9 pr-2 text-[13px] outline-none" />
                   {searchSuggestionField === 'primary' && searchSuggestions.length > 0 && <SearchSuggestions items={searchSuggestions} onSelect={(value) => chooseSearchSuggestion('primary', value)} />}
                 </div>
+                {!compactBottomPanel && <>
                 <div className="mt-2 grid grid-cols-3 gap-1">
                   <button type="button" onClick={() => setSfwFilter('sfw')} className={`rounded-md px-2 py-1.5 text-[13px] font-semibold ${sfwFilter === 'sfw' ? 'bg-[var(--sc-gold-soft)] text-[var(--sc-gold-strong)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}>SFW</button>
                   <button type="button" onClick={() => setSfwFilter('nsfw')} className={`rounded-md px-2 py-1.5 text-[13px] font-semibold ${sfwFilter === 'nsfw' ? 'bg-[var(--sc-danger-soft)] text-[var(--sc-danger)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}>NSFW</button>
@@ -1069,26 +1317,11 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
                   <button type="button" onClick={() => setViewMode('browse')} className={`rounded-md px-2 py-1.5 text-[13px] font-semibold ${viewMode === 'browse' ? 'bg-[var(--sc-gold-soft)] text-[var(--sc-gold-strong)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}>Browse</button>
                   <button type="button" onClick={() => setViewMode('build')} className={`rounded-md px-2 py-1.5 text-[13px] font-semibold ${viewMode === 'build' ? 'bg-[var(--sc-info-soft)] text-[var(--sc-info)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}>Build prompt</button>
                 </div>
-                <section className="mt-2 rounded-lg border border-[var(--sc-border-soft)] bg-[var(--sc-surface-0)]">
-                  <button type="button" onClick={() => setShowLibraryControls((v) => !v)} className="flex w-full items-center justify-between px-2.5 py-2 text-left">
-                    <span className="flex items-center gap-2 text-[13px] font-semibold text-[var(--sc-text-secondary)]"><Settings2 className="h-3 w-3 text-[var(--sc-gold-strong)]" /> Library & filtering</span>
-                    {showLibraryControls ? <ChevronDown className="h-3.5 w-3.5 text-[var(--sc-text-dim)]" /> : <ChevronRight className="h-3.5 w-3.5 text-[var(--sc-text-dim)]" />}
-                  </button>
-                  {showLibraryControls && <div className="border-t border-[var(--sc-border-soft)] p-2">
-                    <label className="block text-[12px] font-semibold uppercase tracking-[.11em] text-[var(--sc-text-dim)]">Library source</label>
-                    <select value={source} onChange={(e) => { const nextSource = e.target.value as SourceMode; setSource(nextSource); setActivePath('All'); setQuery(''); setCategorySearch(''); setAllSearch(''); setRemoteSearchMode('category'); if (nextSource === 'internet') setTaxonomy('danbooru_groups'); }} className="sc-theme-select mt-1 h-8 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[13px] outline-none">{SOURCE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
-                    <div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">{SOURCE_OPTIONS.find((option) => option.id === source)?.description}</div>
-                    <label className="mt-2 block text-[12px] font-semibold uppercase tracking-[.11em] text-[var(--sc-text-dim)]">Taxonomy</label>
-                    <select value={taxonomy} onChange={(e) => { setTaxonomy(e.target.value as BuilderTaxonomyId); setActivePath('All'); }} disabled={source === 'curated' || source === 'internet'} className="sc-theme-select mt-1 h-8 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[13px] outline-none disabled:opacity-50">{BUILDER_TAXONOMIES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
-                    <div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">{BUILDER_TAXONOMIES.find((option) => option.id === taxonomy)?.description}</div>
-                    <div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">Internet mode uses a local Anima classification layer over live Danbooru tags. Categories are loaded on demand; Danbooru's native category is retained as metadata.</div>
-                    {activePath === '__favorites__' && <select value={favoriteFolderFilter} onChange={(e) => setFavoriteFolderFilter(e.target.value as 'All' | FavoriteFolder)} className="sc-theme-select mt-2 h-7 w-full rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[11px] outline-none"><option value="All">All favorite folders</option>{FAVORITE_FOLDERS.map((folder) => <option key={folder} value={folder}>{folder}</option>)}</select>}
-                  </div>}
-                </section>
                 <div className="mt-2 grid grid-cols-2 gap-1">
                   <button type="button" onClick={() => selectPath('__favorites__')} className={`rounded-lg px-2 py-2 text-left text-[13px] font-semibold ${activePath === '__favorites__' ? 'bg-[var(--sc-gold-soft)] text-[var(--sc-gold-strong)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}><Star className="mr-1 inline h-3 w-3" /> Favorites <span className="float-right">{favorites.size}</span></button>
                   <button type="button" onClick={() => selectPath('__builder__')} className={`rounded-lg px-2 py-2 text-left text-[13px] font-semibold ${activePath === '__builder__' ? 'bg-[var(--sc-info-soft)] text-[var(--sc-info)]' : 'bg-[var(--sc-surface-2)] text-[var(--sc-text-muted)]'}`}><Layers3 className="mr-1 inline h-3 w-3" /> Builder tags <span className="float-right">{currentTokens.length}</span></button>
                 </div>
+                </>}
               </section>
 
               <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--sc-border-soft)] bg-[var(--sc-surface-0)] px-2.5 py-1.5">
@@ -1127,11 +1360,14 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
               </div>
 
               {source === 'internet' && !query.trim() && <div className="mt-3 rounded-lg border border-dashed border-[var(--sc-border)] p-3 text-[12px] leading-5 text-[var(--sc-text-dim)]">Internet mode queries Danbooru on demand. Search is fast and paginated; it does not download the entire tag database just to open the builder.</div>}
-              {loadingLibrary && <div className="mt-2 flex items-center gap-2 px-2 text-[12px] text-[var(--sc-text-dim)]"><RefreshCw className="h-3 w-3 animate-spin" /> {source === 'internet' ? 'Searching Danbooru…' : 'Loading tag index…'}</div>}
-              {libraryError && <div className="mt-2 rounded-lg border border-[var(--sc-danger)]/30 bg-[var(--sc-danger-soft)] p-2 text-[11px] text-[var(--sc-danger)]">{libraryError}</div>}
+                </div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-y-auto rounded-xl border border-[var(--sc-border-soft)] bg-[var(--sc-bg)] p-2">
+                  {viewMode === 'build' ? <div className="flex h-full min-h-40 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--sc-border)] p-4 text-center text-[12px] text-[var(--sc-text-dim)]"><Layers3 className="h-5 w-5" /><span>Tag results are hidden in Build Prompt mode.</span><button type="button" onClick={() => setViewMode('browse')} className="sc-builder-action">Browse tags</button></div> : renderTagLibraryBrowser()}
+                </div>
+              </div>
             </aside>
 
-            <main className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden bg-[var(--sc-bg)] p-3">
+            <main className="order-3 min-h-0 min-w-0 w-full flex-1 overflow-y-auto overflow-x-hidden bg-[var(--sc-bg)] p-3">
               <section className="mb-3 rounded-xl border border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]/30 p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -1165,24 +1401,30 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
                   </div>}
                 </section>
 
-                {source === 'internet' && <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] px-3 py-2 text-[11px]"><span className="text-[var(--sc-text-muted)]">Live Danbooru · category-aware, on-demand search.</span><a className="inline-flex items-center gap-1 text-[var(--sc-info)] hover:underline" href="https://danbooru.donmai.us/" target="_blank" rel="noreferrer">Open Danbooru <ExternalLink className="h-3 w-3" /></a></div>}
-
-                <section className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]">
-                  {source === 'internet' && <div className="border-b border-[var(--sc-border-soft)] p-3"><div className="relative"><Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-[var(--sc-text-dim)]" /><input value={allSearch} onFocus={() => setSearchSuggestionField('all')} onChange={(e) => { setRemoteSearchMode('all'); setAllSearch(e.target.value); setCategorySearch(''); setRemotePage(1); }} placeholder="Search all Danbooru tags…" className="sc-theme-input h-9 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] pl-9 pr-2 text-[13px] outline-none" />{searchSuggestionField === 'all' && searchSuggestions.length > 0 && <SearchSuggestions items={searchSuggestions} onSelect={(value) => chooseSearchSuggestion('all', value)} />}</div><div className="mt-1 text-[10px] text-[var(--sc-text-dim)]">Searches the live Danbooru index independently of the selected category. Suggestions use the same session cache as tag browsing.</div></div>}
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--sc-border-soft)] px-3 py-2.5"><div><div className="text-[13px] font-semibold">{activePath === '__favorites__' ? 'Favorite tags' : activePath === '__builder__' ? 'Builder draft tags' : source === 'curated' ? 'Curated Anima tags' : activePath === 'All' ? 'All tags' : activePath.split('::').join(' / ')}</div><div className="text-[11px] text-[var(--sc-text-muted)]">Click a tag to add/remove it from the selected builder draft. The draft boxes above are the only prompt text controlled here. Click the info icon for taxonomy, confidence, aliases, related data and source details.</div></div><div className="flex items-center gap-2"><select value={sort} onChange={(e) => setSort(e.target.value as SortMode)} className="sc-theme-select h-7 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[11px] outline-none"><option value="popularity">Popular</option><option value="alphabetical">A–Z</option></select><span className="rounded-full border border-[var(--sc-border)] px-2 py-0.5 text-[12px] text-[var(--sc-text-dim)]">{activeTags.length} shown</span></div></div>
-                  {activeTags.length === 0 ? <div className="p-10 text-center text-[12px] text-[var(--sc-text-dim)]">{source === 'internet' ? 'No live matches returned.' : 'No tags in this view.'}</div> : <div key={`${source}|${taxonomy}|${activePath}|${query}|${categorySearch}|${allSearch}|${remoteSearchMode}|${localPage}|${remotePage}|${sfwFilter}|${sort}`} className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">{activeTags.map((tag) => <TagCard key={tag.id} tag={tag} selected={selectedSet.has(normalizeToken(tag.label))} favorite={favorites.has(normalizeToken(tag.label))} onToggle={() => toggleTag(tag.label)} onFavorite={() => toggleFavorite(tag)} onInspect={() => inspect(tag)} />)}</div>}
-                </section>
-
-                {source !== 'curated' && source !== 'internet' && maxLocalPage > 1 && activePath !== '__favorites__' && activePath !== '__builder__' && <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] p-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Page {localPage} / {maxLocalPage} · {localPageTotal.toLocaleString()} matching tags</span><div className="flex gap-1"><button type="button" className="sc-builder-action" disabled={localPage <= 1} onClick={() => setLocalPage((p) => Math.max(1, p - 1))}><ArrowUp className="h-3 w-3 -rotate-90" /> Previous</button><button type="button" className="sc-builder-action" disabled={localPage >= maxLocalPage} onClick={() => setLocalPage((p) => Math.min(maxLocalPage, p + 1))}>Next 1,000 <ArrowDown className="h-3 w-3 -rotate-90" /></button></div></div>}
-                {source === 'internet' && <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-1)] p-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Page {remotePage}{remoteTotalCount !== null ? ` / ${Math.max(1, Math.ceil(remoteTotalCount / REMOTE_PAGE_LIMIT)).toLocaleString()}` : ''} · {remoteTags.length.toLocaleString()} shown · live index</span><div className="flex gap-1"><button type="button" className="sc-builder-action" disabled={remotePage <= 1} onClick={() => setRemotePage((p) => Math.max(1, p - 1))}><ArrowUp className="h-3 w-3 -rotate-90" /> Previous</button><button type="button" className="sc-builder-action" disabled={!remoteHasMore} onClick={() => setRemotePage((p) => p + 1)}>Next <ArrowDown className="h-3 w-3 -rotate-90" /></button></div></div>}
-
-                <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><button type="button" onClick={() => setShowSuggestions((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><Sparkles className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Context-aware suggestions</span>{showSuggestions ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showSuggestions && <div className="border-t border-[var(--sc-border-soft)] p-2.5"><div className="mb-2 text-[11px] text-[var(--sc-text-muted)]">Non-destructive suggestions inferred from the current tag stack.</div><div className="flex flex-wrap gap-1.5">{suggestions.length ? suggestions.map((tag) => <button key={`suggest-${tag}`} type="button" onClick={() => toggleTag(tag)} className="rounded-full border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2.5 py-1 text-[11px] text-[var(--sc-text-secondary)] hover:border-[var(--sc-theme-border)] hover:text-[var(--sc-text)]">+ {tag}</button>) : <span className="text-[12px] text-[var(--sc-text-dim)]">Add a subject, pose, camera or environment tag to unlock suggestions.</span>}</div></div>}</section>
-
-                <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-1)]"><button type="button" onClick={() => setShowRecipePanel((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><BookOpen className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Recipes</span>{showRecipePanel ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showRecipePanel && <div className="border-t border-[var(--sc-border-soft)] p-2"><div className="mb-2 flex items-center gap-2"><span className="text-[12px] text-[var(--sc-text-dim)]">Save folder</span><select value={recipeFolder} onChange={(e) => setRecipeFolder(e.target.value as FavoriteFolder)} className="sc-theme-select h-7 flex-1 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[11px] outline-none">{FAVORITE_FOLDERS.map((folder) => <option key={folder}>{folder}</option>)}</select></div><div className="grid gap-2 sm:grid-cols-2">{recipes.map((recipe) => <div key={recipe.id} className={`rounded-lg border p-2 ${activePreset === recipe.id ? 'border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]' : 'border-[var(--sc-border)] bg-[var(--sc-surface-2)]'}`}><div className="flex items-center gap-2"><button type="button" onClick={() => applyRecipe(recipe)} className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold text-[var(--sc-text)]">{recipe.name}</button><span className="rounded-full bg-[var(--sc-surface-3)] px-1.5 py-0.5 text-[10px] text-[var(--sc-text-dim)]">{recipe.folder}</span>{recipe.createdAt !== 0 && <button type="button" onClick={() => deleteRecipe(recipe.id)} className="p-1 text-[var(--sc-text-dim)] hover:text-[var(--sc-danger)]"><Trash2 className="h-3 w-3" /></button>}</div><div className="mt-1 truncate text-[11px] text-[var(--sc-text-muted)]">{recipe.positive}</div></div>)}</div></div>}</section>
+                {/* Tag results are rendered beside the category sidebar in the bottom library area. */}
               </>}
             </main>
 
-            <aside className="min-h-0 overflow-y-auto border-l border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] p-3">
+            {!topPanelHidden && <aside style={{ flex: `0 0 ${inspectorPanelHeight}px` }} className="order-1 w-full min-h-0 overflow-y-auto border-b border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] p-2.5">
+              <section className="mb-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)]">
+                <button type="button" onClick={() => setShowLibraryControls((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left" aria-expanded={showLibraryControls}>
+                  <span className="flex items-center gap-2 text-[13px] font-semibold"><BookOpen className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Library & taxonomy</span>
+                  {showLibraryControls ? <ChevronDown className="h-3.5 w-3.5 text-[var(--sc-text-dim)]" /> : <ChevronRight className="h-3.5 w-3.5 text-[var(--sc-text-dim)]" />}
+                </button>
+                {showLibraryControls && <div className="grid gap-3 border-t border-[var(--sc-border-soft)] p-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-[.11em] text-[var(--sc-text-dim)]">Library source</label>
+                    <select value={source} onChange={(e) => { const nextSource = e.target.value as SourceMode; setSource(nextSource); setActivePath('All'); setQuery(''); setCategorySearch(''); setAllSearch(''); setRemoteSearchMode('category'); }} className="sc-theme-select mt-1 h-8 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[12px] outline-none">{SOURCE_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+                    <div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">{SOURCE_OPTIONS.find((option) => option.id === source)?.description}</div>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold uppercase tracking-[.11em] text-[var(--sc-text-dim)]">Taxonomy</label>
+                    <select value={taxonomy} onChange={(e) => { setTaxonomy(e.target.value as BuilderTaxonomyId); setActivePath('All'); }} disabled={source === 'curated' || source === 'default_yaml'} className="sc-theme-select mt-1 h-8 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[12px] outline-none disabled:opacity-50">{BUILDER_TAXONOMIES.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+                    <div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">{BUILDER_TAXONOMIES.find((option) => option.id === taxonomy)?.description}</div>
+                  </div>
+                  {activePath === '__favorites__' && <div className="sm:col-span-2"><label className="block text-[11px] font-semibold text-[var(--sc-text-dim)]">Favorite folder</label><select value={favoriteFolderFilter} onChange={(e) => setFavoriteFolderFilter(e.target.value as 'All' | FavoriteFolder)} className="sc-theme-select mt-1 h-8 w-full rounded-lg border border-[var(--sc-border)] bg-[var(--sc-surface-2)] px-2 text-[12px] outline-none"><option value="All">All favorite folders</option>{FAVORITE_FOLDERS.map((folder) => <option key={folder} value={folder}>{folder}</option>)}</select></div>}
+                </div>}
+              </section>
               <section className="rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)]">
                 <button type="button" onClick={() => setShowInspector((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><Info className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Tag Inspector</span>{showInspector ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>
                 {showInspector && <div className="border-t border-[var(--sc-border-soft)] p-2.5">{inspectedDetail ? <>
@@ -1205,7 +1447,10 @@ export const PromptBuilderModal: React.FC<PromptBuilderModalProps> = ({ open, on
               <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)]"><button type="button" onClick={() => setShowDiagnostics((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="flex items-center gap-2 text-[13px] font-semibold"><Settings2 className="h-3.5 w-3.5 text-[var(--sc-gold-strong)]" /> Prompt diagnostics</span>{showDiagnostics ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showDiagnostics && <div className="border-t border-[var(--sc-border-soft)] p-2.5">{currentDiagnostics.length ? <div className="space-y-1.5">{currentDiagnostics.map((issue, index) => <div key={`${issue.code}-${index}`} className={`rounded-lg border p-2 text-[11px] ${issue.severity === 'warning' ? 'border-[var(--sc-warning)]/30 bg-[var(--sc-warning-soft)] text-[var(--sc-warning)]' : 'border-[var(--sc-info)]/30 bg-[var(--sc-info-soft)] text-[var(--sc-info)]'}`}><strong>{issue.title}</strong><div className="mt-0.5">{issue.detail}</div></div>)}</div> : <div className="py-3 text-center text-[12px] text-[var(--sc-text-dim)]">No obvious conflicts or duplicate tags.</div>}<div className="mt-2 text-[10px] leading-4 text-[var(--sc-text-dim)]">Diagnostics are advisory. They never block prompt insertion.</div></div>}</section>
 
               <section className="mt-3 rounded-xl border border-[var(--sc-border)] bg-[var(--sc-surface-0)]"><button type="button" onClick={() => setShowLibraryHealth((v) => !v)} className="flex w-full items-center justify-between px-3 py-2.5 text-left"><span className="text-[13px] font-semibold">Library health</span>{showLibraryHealth ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}</button>{showLibraryHealth && <div className="border-t border-[var(--sc-border-soft)]"><div className="grid grid-cols-2 gap-1.5 p-2 text-[11px]"><div className="col-span-2 rounded-md border border-[var(--sc-border)] bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Local snapshot</div><div className="mt-1 font-semibold">{(builderHealth?.uniqueTags ?? builderTotal).toLocaleString()} indexed tags</div><div className="mt-1 text-[10px] leading-4 text-[var(--sc-text-dim)]">This is the bundled snapshot, not the live Danbooru total. Internet mode searches the current live index on demand.</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">General</div><div className="mt-1 font-semibold">{builderHealth?.nativeCounts?.General?.toLocaleString?.() ?? '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Character</div><div className="mt-1 font-semibold">{builderHealth?.nativeCounts?.Character?.toLocaleString?.() ?? '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Artist</div><div className="mt-1 font-semibold">{builderHealth?.nativeCounts?.Artist?.toLocaleString?.() ?? '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Copyright</div><div className="mt-1 font-semibold">{builderHealth?.nativeCounts?.Copyright?.toLocaleString?.() ?? '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Meta</div><div className="mt-1 font-semibold">{builderHealth?.nativeCounts?.Meta?.toLocaleString?.() ?? '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">NSFW tags</div><div className="mt-1 font-semibold">{builderHealth ? builderHealth.nsfwTags.toLocaleString() : '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Semantic placements</div><div className="mt-1 font-semibold">{builderHealth ? builderHealth.semanticPlacements.toLocaleString() : '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Multi-placement</div><div className="mt-1 font-semibold">{builderHealth ? builderHealth.multiPlacement.toLocaleString() : '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Low confidence</div><div className="mt-1 font-semibold">{builderHealth ? builderHealth.lowConfidence.toLocaleString() : '—'}</div></div><div className="rounded-md bg-[var(--sc-surface-2)] p-2"><div className="text-[10px] text-[var(--sc-text-dim)]">Taxonomy</div><div className="mt-1 truncate font-semibold">{BUILDER_TAXONOMIES.find((x) => x.id === taxonomy)?.label}</div></div></div></div>}</section>
-            </aside>
+            </aside>}
+
+            {!topPanelHidden && <div role="separator" aria-orientation="horizontal" aria-label="Resize tag inspector panel" title="Drag to resize the tag inspector" onMouseDown={(event) => startBuilderPanelResize(event, 'inspector')} className="order-2 z-30 flex h-2.5 shrink-0 cursor-row-resize items-center justify-center bg-[var(--sc-surface-2)] hover:bg-[var(--sc-gold-soft)] active:bg-[var(--sc-gold-soft)]"><div className="h-1 w-12 rounded-full bg-[var(--sc-border)]" /></div>}
+            <div role="separator" aria-orientation="horizontal" aria-label="Resize category panel" title="Drag to resize the category browser" onMouseDown={(event) => startBuilderPanelResize(event, 'categories')} className="order-4 z-30 flex h-2.5 shrink-0 cursor-row-resize items-center justify-center bg-[var(--sc-surface-2)] hover:bg-[var(--sc-gold-soft)] active:bg-[var(--sc-gold-soft)]"><div className="h-1 w-12 rounded-full bg-[var(--sc-border)]" /></div>
           </div>
 
           <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[var(--sc-border-soft)] bg-[var(--sc-surface-1)] px-4 py-2.5"><div className="text-[12px] text-[var(--sc-text-dim)]">/ focuses search · Ctrl/Cmd+Enter closes · builder drafts are copy-only and never change generation · SFW/NSFW can be combined with <strong>Both</strong>.</div><div className="flex items-center gap-2"><button type="button" onClick={() => { setBuilderPositivePrompt(normalizeAnimaPrompt(builderPositivePrompt)); setBuilderNegativePrompt(normalizeAnimaPrompt(builderNegativePrompt)); emitToast('Both builder drafts normalized for Anima', 'success'); }} className="sc-builder-action"><RotateCcw className="h-3 w-3" /> Normalize both</button><button type="button" onClick={onClose} className="rounded-lg bg-[var(--sc-gold)] px-3 py-1.5 text-[12px] font-semibold text-black shadow-sm transition hover:bg-[var(--sc-gold-strong)]">Done</button></div></footer>
@@ -1253,7 +1498,7 @@ function BuilderPromptDraftBox({
       </div>
       <button type="button" onClick={onCopy} className="sc-builder-action shrink-0"><Copy className="h-3 w-3" /> Copy</button>
     </div>
-    <textarea value={value} onChange={(e) => onChange(e.target.value)} spellCheck={false} placeholder={isNegative ? 'worst quality, low quality, bad anatomy…' : 'masterpiece, best quality, 1girl, ...'} className="mt-2 min-h-28 w-full resize-y rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] px-2.5 py-2 text-[13px] leading-5 text-[var(--sc-text)] outline-none focus:border-[var(--sc-theme-border)]" />
+    <PromptAutocompleteTextarea value={value} onChange={onChange} rows={4} aria-label={title} placeholder={isNegative ? 'worst quality, low quality, bad anatomy…' : 'masterpiece, best quality, 1girl, ...'} className="mt-2 min-h-28 w-full resize-y rounded-lg border border-[var(--sc-border)] bg-[var(--sc-control-bg)] px-2.5 py-2 text-[13px] leading-5 text-[var(--sc-text)] outline-none focus:border-[var(--sc-theme-border)]" />
     <div className="mt-2 rounded-lg border border-[var(--sc-border-soft)] bg-[var(--sc-surface-0)] p-2">
       <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-[var(--sc-text-dim)]"><span>Reorder tags</span><span>↑ / ↓</span></div>
       <div className="flex max-h-32 flex-wrap gap-1 overflow-y-auto">
@@ -1278,14 +1523,14 @@ function Badge({ children, tone = 'normal' }: { children: React.ReactNode; tone?
 
 function InspectorRow({ label, value }: { label: string; value: string }) { return <div className="grid grid-cols-[82px_minmax(0,1fr)] gap-2"><span className="text-[var(--sc-text-dim)]">{label}</span><span className="break-words text-[var(--sc-text-secondary)]">{value}</span></div>; }
 
-function TagCard({ tag, selected, favorite, onToggle, onFavorite, onInspect }: { tag: DisplayTag; selected: boolean; favorite: boolean; onToggle: () => void; onFavorite: () => void; onInspect: () => void }) {
-  return <div className={`group relative flex min-h-12 items-stretch overflow-hidden rounded-md border transition-colors ${selected ? 'border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]' : tag.isNsfw ? 'border-[var(--sc-danger)]/25 bg-[var(--sc-surface-2)]' : 'border-[var(--sc-border)] bg-[var(--sc-surface-2)] hover:border-[var(--sc-border-strong)] hover:bg-[var(--sc-surface-3)]'}`}>
+function TagCard({ tag, selected, favorite, onToggle, onFavorite, onInspect, onContextMenu }: { tag: DisplayTag; selected: boolean; favorite: boolean; onToggle: () => void; onFavorite: () => void; onInspect: () => void; onContextMenu: (event: React.MouseEvent) => void }) {
+  return <div onContextMenu={onContextMenu} className={`group relative flex min-h-12 items-stretch overflow-hidden rounded-md border transition-colors ${selected ? 'border-[var(--sc-theme-border)] bg-[var(--sc-gold-soft)]' : tag.isNsfw ? 'border-[var(--sc-danger)]/25 bg-[var(--sc-surface-2)]' : 'border-[var(--sc-border)] bg-[var(--sc-surface-2)] hover:border-[var(--sc-border-strong)] hover:bg-[var(--sc-surface-3)]'}`}>
     <button type="button" onClick={onToggle} className="min-w-0 flex-1 px-2.5 py-2 text-left" title={tag.origin === 'internet' ? `${tag.label} · ${typeof tag.postCount === 'number' ? `${tag.postCount.toLocaleString()} posts` : 'post count unavailable'}` : (tag.description || `Add ${tag.label}`)}>
       <span className={`block truncate text-[12px] ${selected ? 'font-semibold text-[var(--sc-gold-strong)]' : 'text-[var(--sc-text)]'}`}>{tag.label}</span>
       {typeof tag.postCount === 'number' && <span className="mt-0.5 block text-[10px] tabular-nums text-[var(--sc-text-dim)]">{tag.postCount.toLocaleString()} posts</span>}
     </button>
     <div className="flex shrink-0 items-center pr-1">
-      <button type="button" onClick={onInspect} className="rounded p-1.5 text-[var(--sc-text-dim)] transition hover:bg-[var(--sc-surface-3)] hover:text-[var(--sc-info)]" title="Inspect tag details"><Info className="h-3 w-3" /></button>
+      <button type="button" onClick={onInspect} aria-label={`Inspect ${tag.label}`} className="rounded-md border border-cyan-300/50 bg-cyan-400/10 p-1.5 text-cyan-200 transition hover:border-cyan-200 hover:bg-cyan-400/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-300" title="Inspect tag details"><Info className="h-4 w-4" /></button>
       <button type="button" onClick={onFavorite} className={`rounded p-1.5 transition hover:bg-[var(--sc-surface-3)] ${favorite ? 'text-[var(--sc-gold-strong)]' : 'text-[var(--sc-text-dim)] hover:text-[var(--sc-gold-strong)]'}`} title={favorite ? 'Remove favorite' : 'Favorite tag'}><Star className={`h-3 w-3 ${favorite ? 'fill-current' : ''}`} /></button>
     </div>
   </div>;

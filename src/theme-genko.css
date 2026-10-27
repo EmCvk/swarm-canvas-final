@@ -1,0 +1,238 @@
+/* ==========================================================================
+   Genko: a manuscript-paper theme and layout (light).
+
+   Subject: the paper manga artists draw on. A pale blue guide grid (the
+   "non-photo" blue that does not show up in a scan), black ink for frames and
+   type, and a red editor's pencil for the one thing that needs attention.
+   Frames have hard offset shadows like comic panels. Labels are plain sentence
+   case in a condensed display face; numbers are monospaced.
+   ========================================================================== */
+
+:root[data-ui-theme="genko"] {
+  color-scheme: light;
+
+  --gk-ink: #15131a;
+  --gk-paper: #fbfbf8;
+  --gk-blue: #8cc8ec;
+  --gk-blue-soft: rgba(140, 200, 236, 0.32);
+  --gk-red: #d6303a;
+
+  --sc-black: #e4e4de;
+  --sc-bg: #f1f1ed;
+  --sc-surface-0: #ffffff;
+  --sc-surface-1: #fbfbf8;
+  --sc-surface-2: #f0f0ea;
+  --sc-surface-3: #e3e3db;
+  --sc-surface-4: #d3d3c9;
+  --sc-border: #b4b4a9;
+  --sc-theme-border: #b4b4a9;
+  --sc-border-soft: #d9d9cf;
+
+  --sc-text: #15131a;
+  --sc-text-secondary: #34313b;
+  --sc-text-muted: #57545f;
+  --sc-text-dim: #6a6772;
+
+  /* The remap layer calls the primary accent "gold"; in Genko that is the red pencil. */
+  --sc-gold: #d6303a;
+  --sc-gold-strong: #b3202b;
+  --sc-gold-soft: rgba(214, 48, 58, 0.1);
+  --sc-info: #1f6fa8;
+  --sc-info-soft: rgba(31, 111, 168, 0.12);
+  --sc-success: #1f7a52;
+  --sc-success-soft: rgba(31, 122, 82, 0.12);
+  --sc-warning: #94580a;
+  --sc-warning-soft: rgba(148, 88, 10, 0.12);
+  --sc-danger: #c0262f;
+  --sc-danger-soft: rgba(192, 38, 47, 0.1);
+
+  --sc-theme-shadow: rgba(21, 19, 26, 0.16);
+  --sc-shadow: 6px 6px 0 var(--gk-ink);
+  --sc-font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "SF Pro Text", Roboto, sans-serif;
+  --sc-font-display: "Bahnschrift", "Segoe UI Variable Display", "Segoe UI Semibold", "Segoe UI", system-ui, sans-serif;
+  --sc-font-mono: "Cascadia Mono", "Cascadia Code", "SF Mono", Consolas, "Liberation Mono", monospace;
+  --font-sans: var(--sc-font-ui);
+  --font-mono: var(--sc-font-mono);
+  --sc-focus-ring: 0 0 0 2px #fff, 0 0 0 5px var(--gk-blue), 0 0 0 7px var(--gk-ink);
+  --sx-overlay-radius: 0;
+  --sx-overlay-border: 3px solid var(--gk-ink);
+}
+
+.sc-workspace-shell[data-ui-theme="genko"] {
+  --sc-panel-bg: var(--sc-surface-0);
+  --sc-panel-raised: var(--sc-surface-2);
+  --sc-control-bg: var(--sc-surface-2);
+  --sc-control-hover: var(--sc-surface-3);
+  --sx-frame: 84px;
+  --sx-frame-radius: 2px;
+  --sx-frame-ring: var(--gk-red);
+  font-family: var(--sc-font-ui);
+  font-feature-settings: "tnum" 1;
+  accent-color: var(--gk-red);
+}
+:root[data-ui-theme="genko"] body { font-family: var(--sc-font-ui); background: var(--sc-bg); }
+:root[data-ui-theme="genko"] ::selection { background: var(--gk-blue-soft); color: var(--gk-ink); }
+
+/* Light themes: inherited white utility text/backgrounds would make the older panels look broken (same fix the
+   Paper and Arctic themes get in index.css). */
+:root[data-ui-theme="genko"] .sc-workspace-shell [class*="text-white"] { color: var(--sc-text) !important; }
+:root[data-ui-theme="genko"] .sc-workspace-shell [class*="bg-black"] { background: var(--sc-surface-1) !important; }
+:root[data-ui-theme="genko"] ::-webkit-scrollbar-track { background: var(--sc-surface-2); }
+:root[data-ui-theme="genko"] ::-webkit-scrollbar-thumb { background: var(--sc-border); border-color: var(--sc-surface-2); }
+.sc-workspace-shell[data-ui-theme="genko"] * { scrollbar-color: var(--sc-border) var(--sc-surface-2); scrollbar-width: thin; }
+
+.sc-workspace-shell[data-ui-theme="genko"] :is(button, a, input, select, textarea, [role="button"], [role="tab"], [tabindex]):focus-visible {
+  outline: none !important;
+  box-shadow: var(--sc-focus-ring) !important;
+}
+
+/* Dialogs the layout does not own: ink border and a hard shadow, like a comic panel. */
+.sc-workspace-shell[data-ui-theme="genko"] .sc-context-menu,
+.sc-workspace-shell[data-ui-theme="genko"] .sc-theme-menu,
+.sc-workspace-shell[data-ui-theme="genko"] .sc-settings-modal {
+  background: var(--sc-surface-0) !important;
+  border: 2px solid var(--gk-ink) !important;
+  border-radius: 0 !important;
+  box-shadow: 5px 5px 0 var(--gk-ink) !important;
+}
+.sc-workspace-shell[data-ui-theme="genko"] .sc-dialog-card { border-radius: 0; border: 2px solid var(--gk-ink); box-shadow: 5px 5px 0 var(--gk-ink); }
+
+/* Generate! The one red control, with a paper-coloured offset like a sticker. */
+.sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button {
+  background: var(--gk-red);
+  color: #fff;
+  font-family: var(--sc-font-display);
+  font-weight: 700;
+  letter-spacing: .02em;
+  border-radius: 0 !important;
+  box-shadow: 3px 3px 0 #fff;
+  transition: transform .08s ease, box-shadow .08s ease;
+}
+.sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 #fff; filter: none; }
+.sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button:active { transform: translate(3px, 3px); box-shadow: 0 0 0 #fff; }
+.sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button:disabled { background: var(--sc-surface-4); color: var(--sc-text-dim); box-shadow: none; }
+.sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button.is-cancel { background: #fff; color: var(--gk-red); box-shadow: 3px 3px 0 var(--gk-red); }
+
+/* ============================== layout ================================== */
+
+.gk-root {
+  display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; min-width: 0;
+  color: var(--gk-ink); font-family: var(--sc-font-ui);
+  background-color: var(--gk-paper);
+  background-image:
+    linear-gradient(rgba(140, 200, 236, .34) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140, 200, 236, .34) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* ---- title strip ---- */
+.gk-title {
+  position: relative; flex: none; display: flex; align-items: center; gap: 16px; height: 62px; padding: 0 16px;
+  background: var(--gk-ink); color: #fff; border-bottom: 3px solid var(--gk-red);
+}
+.gk-brand { display: inline-flex; align-items: center; gap: 10px; }
+.gk-brand-name { font-family: var(--sc-font-display); font-weight: 700; font-size: 19px; letter-spacing: .01em; font-variation-settings: "wght" 700, "wdth" 82; }
+.gk-brand-kana { font-family: "Yu Gothic UI", "Meiryo UI", "Hiragino Sans", "Noto Sans JP", sans-serif; font-size: 12px; font-weight: 700; letter-spacing: .12em; color: var(--gk-ink); background: #fff; padding: 1px 6px; transform: rotate(-3deg); }
+.gk-tabs { display: inline-flex; align-self: flex-end; gap: 4px; margin-left: 6px; }
+.gk-tab {
+  display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 18px 0 12px; background: rgba(255, 255, 255, .08); color: #d7d5de;
+  font-family: var(--sc-font-display); font-weight: 650; font-size: 15px; letter-spacing: .02em; cursor: pointer; transition: background .12s, color .12s;
+}
+.gk-tab:hover { background: rgba(255, 255, 255, .18); color: #fff; }
+.gk-tab.is-active { background: var(--gk-paper); color: var(--gk-ink); box-shadow: inset 0 3px 0 var(--gk-red); }
+.gk-tab-no { display: inline-grid; place-items: center; width: 20px; height: 20px; background: rgba(255, 255, 255, .16); color: #fff; font: 700 11px var(--sc-font-mono); }
+.gk-tab.is-active .gk-tab-no { background: var(--gk-ink); color: #fff; }
+.gk-spacer { flex: 1; }
+.gk-status { display: inline-flex; align-items: center; gap: 9px; height: 34px; padding: 0 12px; background: rgba(255, 255, 255, .08); color: #e6e4ec; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.gk-status:hover { background: rgba(255, 255, 255, .16); }
+.gk-lamp { width: 9px; height: 9px; border-radius: 50%; background: #9a98a4; }
+.gk-lamp.is-online { background: #4fd68f; }
+.gk-lamp.is-offline { background: #ff6b73; }
+.gk-lamp.is-reconnecting { background: #ffc24d; animation: gk-blink 1s steps(2, jump-none) infinite; }
+@keyframes gk-blink { 50% { opacity: .3; } }
+.gk-queue { padding: 1px 7px; background: #fff; color: var(--gk-ink); font-size: 11.5px; }
+.gk-utils { display: inline-flex; gap: 2px; }
+.gk-util { width: 34px; height: 34px; display: grid; place-items: center; background: transparent; color: #cfcdd7; cursor: pointer; transition: background .12s, color .12s; }
+.gk-util:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+.sc-workspace-shell .gk-generate { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; min-width: 150px; padding: 0 22px; font-size: 18px; cursor: pointer; font-variation-settings: "wght" 700, "wdth" 85; }
+/* ink line: generation progress, drawn across the red rule */
+.gk-ink { position: absolute; left: 0; right: 0; bottom: -3px; height: 3px; pointer-events: none; }
+.gk-ink i { display: block; height: 100%; background: #fff; transition: width .25s ease; }
+
+/* ---- pages ---- */
+.gk-pages { position: relative; flex: 1; min-height: 0; }
+.gk-page { position: absolute; inset: 0; display: flex; gap: 0; padding: 16px 20px 18px 16px; min-width: 0; min-height: 0; }
+.gk-page.is-hidden { display: none; }
+.gk-archive, .gk-studio { gap: 20px; }
+.gk-library { gap: 0; }
+.gk-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---- frames ---- */
+.gk-frame {
+  position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--sc-surface-0); border: 2px solid var(--gk-ink); box-shadow: 5px 5px 0 var(--gk-ink);
+}
+.gk-grow { flex: 1; }
+.gk-frame-head { flex: none; display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 10px 0 12px; background: var(--gk-paper); border-bottom: 2px solid var(--gk-ink); }
+.gk-frame-title { font-family: var(--sc-font-display); font-weight: 700; font-size: 14px; letter-spacing: .02em; font-variation-settings: "wght" 700, "wdth" 85; }
+.gk-frame-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.gk-frame-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.gk-fill { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.gk-fill > * { flex: 1; min-height: 0; min-width: 0; }
+.gk-link { height: 24px; padding: 0 10px; background: transparent; color: var(--sc-info); font: 600 12px var(--sc-font-ui); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.gk-link:hover { background: var(--gk-blue-soft); }
+
+.gk-vresize { flex: none; width: 20px; position: relative; z-index: 6; cursor: col-resize; }
+.gk-vresize::after { content: ''; position: absolute; top: 8px; bottom: 8px; left: 9px; width: 2px; background: transparent; transition: background .12s; }
+.gk-vresize:hover::after { background: var(--gk-blue); }
+.gk-hresize { flex: none; height: 20px; position: relative; z-index: 6; cursor: row-resize; }
+.gk-hresize::after { content: ''; position: absolute; left: 8px; right: 8px; top: 9px; height: 2px; background: transparent; transition: background .12s; }
+.gk-hresize:hover::after { background: var(--gk-blue); }
+
+.gk-stage-frame { flex: 1; min-height: 180px; }
+.gk-stage-frame .gk-frame-body { background: var(--sc-black); }
+.gk-prompt-frame { flex: none; min-height: 130px; }
+.gk-side-frame { flex: 0 1 auto; min-width: 320px; }
+
+/* mini tabs inside the settings frame header */
+.gk-minitabs { display: inline-flex; gap: 2px; }
+.gk-minitab { height: 26px; padding: 0 11px; background: transparent; color: var(--sc-text-muted); font: 650 12.5px var(--sc-font-display); cursor: pointer; }
+.gk-minitab:hover { background: var(--sc-surface-3); color: var(--gk-ink); }
+.gk-minitab.is-active { background: var(--gk-ink); color: #fff; }
+
+/* ---- storyboard strip ---- */
+.gk-story { flex: none; padding: 14px 4px 2px; }
+.gk-story .sx-filmstrip { gap: 12px; padding: 4px 6px 12px; }
+.gk-story .sx-frame { opacity: 1; background: #fff; box-shadow: 0 0 0 2px var(--gk-ink); transform: none; }
+.gk-story .sx-frame:hover { transform: translate(-1px, -1px); box-shadow: 0 0 0 2px var(--gk-ink), 3px 3px 0 2px var(--gk-blue); }
+.gk-story .sx-frame.is-active { box-shadow: 0 0 0 2px var(--gk-ink), 4px 4px 0 2px var(--gk-red); }
+.gk-story .sx-frame-no { background: var(--gk-ink); border-radius: 0; }
+.gk-story .sx-frame-more { background: #fff; color: var(--gk-ink); box-shadow: 0 0 0 2px var(--gk-ink); border-radius: 2px; font-family: var(--sc-font-display); }
+.gk-story .sx-frame-more:hover { background: var(--gk-blue-soft); }
+
+/* ---- studio page ---- */
+.gk-toolsframe { flex: none; width: 320px; }
+.gk-toollist { position: absolute; inset: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.gk-toolitem { display: flex; flex-direction: column; gap: 1px; padding: 10px 14px; text-align: left; background: transparent; border-bottom: 1px solid var(--sc-border-soft); cursor: pointer; transition: background .12s; }
+.gk-toolitem:hover { background: var(--gk-blue-soft); }
+.gk-toolitem.is-active { background: var(--gk-ink); color: #fff; }
+.gk-toolitem-title { font: 700 14px var(--sc-font-display); }
+.gk-toolitem-hint { font-size: 11.5px; color: var(--sc-text-muted); }
+.gk-toolitem.is-active .gk-toolitem-hint { color: #cfcdd7; }
+
+.gk-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; text-align: center;
+  background-image: linear-gradient(rgba(140, 200, 236, .34) 1px, transparent 1px), linear-gradient(90deg, rgba(140, 200, 236, .34) 1px, transparent 1px); background-size: 24px 24px; }
+.gk-empty-title { font: 700 17px var(--sc-font-display); font-variation-settings: "wght" 700, "wdth" 85; }
+.gk-empty p { max-width: 320px; margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--sc-text-muted); }
+
+@media (max-width: 1180px) {
+  .gk-brand-kana, .gk-status span { display: none; }
+  .gk-tab { padding: 0 12px 0 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gk-lamp.is-reconnecting { animation: none; }
+  .gk-ink i, .sc-workspace-shell[data-ui-theme="genko"] .sc-generate-button { transition: none; }
+}
+
+/* Theme picker swatch: paper, red pencil, ink */
+.sc-theme-swatch[data-theme-swatch="genko"] { background: linear-gradient(145deg,#fbfbf8 0 58%,#d6303a 59% 67%,#15131a 68%); }
